@@ -21,7 +21,7 @@
 
 import type { Address, Hash, Log, PublicClient } from "viem";
 import type { RobinhoodChainClient, TokenMetadataRaw, ContractCreationInfo } from "./robinhoodChainClient.js";
-import { getGlobalRpcLimiter, type RpcPriority } from "./rpcConcurrencyLimiter.js";
+import { getGlobalRpcLimiter, type RpcPriority, type RpcLimiterRole } from "./rpcConcurrencyLimiter.js";
 import { getGlobalRpcCallLog, type RpcCallStatus } from "./rpcInstrumentation.js";
 import { getCurrentSignalId } from "../shared/signalContext.js";
 
@@ -30,10 +30,12 @@ export interface InstrumentedChainClientOptions {
   caller: string;
   /** Default priority (§4) for calls made through THIS wrapper instance. Different callers get different priorities by using differently-configured wrappers around the SAME underlying client and the SAME global limiter — never a separate limiter. */
   priority: RpcPriority;
+  /** Phase 7.4 §2/§7/§9 — which logical RPC provider role this wrapper represents (PRIMARY or LOG). Determines both which global concurrency limiter calls go through and how they're tagged for reporting. Defaults to PRIMARY so every pre-Phase-7.4 construction site is unaffected. */
+  role?: RpcLimiterRole;
 }
 
-async function instrumented<T>(caller: string, priority: RpcPriority, method: string, blockRange: { fromBlock: string; toBlock: string } | undefined, fn: () => Promise<T>): Promise<T> {
-  const limiter = getGlobalRpcLimiter();
+async function instrumented<T>(caller: string, priority: RpcPriority, role: RpcLimiterRole, method: string, blockRange: { fromBlock: string; toBlock: string } | undefined, fn: () => Promise<T>): Promise<T> {
+  const limiter = getGlobalRpcLimiter(role);
   const log = getGlobalRpcCallLog();
   const signalId = getCurrentSignalId();
   const startedAt = Date.now();
@@ -51,7 +53,7 @@ async function instrumented<T>(caller: string, priority: RpcPriority, method: st
     throw e;
   } finally {
     const endedAt = Date.now();
-    log.record({ signalId, method, caller, startedAt, endedAt, durationMs: endedAt - startedAt, status, retryCount: 0, fromCache: false, concurrencyAtStart, blockRange, error });
+    log.record({ signalId, method, caller, role, startedAt, endedAt, durationMs: endedAt - startedAt, status, retryCount: 0, fromCache: false, concurrencyAtStart, blockRange, error });
   }
 }
 
@@ -88,20 +90,20 @@ function blockRangeOf(params: any): { fromBlock: string; toBlock: string } | und
  * on `ChainClientLike`.
  */
 export function wrapChainClientWithRpcControl(inner: RobinhoodChainClient, options: InstrumentedChainClientOptions): ChainClientLike {
-  const { caller, priority } = options;
+  const { caller, priority, role = "PRIMARY" } = options;
   return {
     chainId: inner.chainId,
-    getBlockNumber: () => instrumented(caller, priority, "getBlockNumber", undefined, () => inner.getBlockNumber()),
-    getNativeBalance: (address) => instrumented(caller, priority, "getNativeBalance", undefined, () => inner.getNativeBalance(address)),
-    getTokenBalance: (token, owner) => instrumented(caller, priority, "getTokenBalance", undefined, () => inner.getTokenBalance(token, owner)),
-    readContract: (params) => instrumented(caller, priority, "readContract", undefined, () => inner.readContract(params)),
-    getTokenMetadata: (token) => instrumented(caller, priority, "getTokenMetadata", undefined, () => inner.getTokenMetadata(token)),
-    getLogs: (params) => instrumented(caller, priority, "getLogs", blockRangeOf(params), () => inner.getLogs(params)),
-    getBlockTimestamp: (blockNumber) => instrumented(caller, priority, "getBlockTimestamp", undefined, () => inner.getBlockTimestamp(blockNumber)),
-    getBytecode: (address) => instrumented(caller, priority, "getBytecode", undefined, () => inner.getBytecode(address)),
-    getStorageAt: (address, slot) => instrumented(caller, priority, "getStorageAt", undefined, () => inner.getStorageAt(address, slot)),
-    getContractCreationInfo: (address) => instrumented(caller, priority, "getContractCreationInfo", undefined, () => inner.getContractCreationInfo(address)),
-    getTransaction: (hash) => instrumented(caller, priority, "getTransaction", undefined, () => inner.getTransaction(hash)),
-    getTransactionReceipt: (hash) => instrumented(caller, priority, "getTransactionReceipt", undefined, () => inner.getTransactionReceipt(hash)),
+    getBlockNumber: () => instrumented(caller, priority, role, "getBlockNumber", undefined, () => inner.getBlockNumber()),
+    getNativeBalance: (address) => instrumented(caller, priority, role, "getNativeBalance", undefined, () => inner.getNativeBalance(address)),
+    getTokenBalance: (token, owner) => instrumented(caller, priority, role, "getTokenBalance", undefined, () => inner.getTokenBalance(token, owner)),
+    readContract: (params) => instrumented(caller, priority, role, "readContract", undefined, () => inner.readContract(params)),
+    getTokenMetadata: (token) => instrumented(caller, priority, role, "getTokenMetadata", undefined, () => inner.getTokenMetadata(token)),
+    getLogs: (params) => instrumented(caller, priority, role, "getLogs", blockRangeOf(params), () => inner.getLogs(params)),
+    getBlockTimestamp: (blockNumber) => instrumented(caller, priority, role, "getBlockTimestamp", undefined, () => inner.getBlockTimestamp(blockNumber)),
+    getBytecode: (address) => instrumented(caller, priority, role, "getBytecode", undefined, () => inner.getBytecode(address)),
+    getStorageAt: (address, slot) => instrumented(caller, priority, role, "getStorageAt", undefined, () => inner.getStorageAt(address, slot)),
+    getContractCreationInfo: (address) => instrumented(caller, priority, role, "getContractCreationInfo", undefined, () => inner.getContractCreationInfo(address)),
+    getTransaction: (hash) => instrumented(caller, priority, role, "getTransaction", undefined, () => inner.getTransaction(hash)),
+    getTransactionReceipt: (hash) => instrumented(caller, priority, role, "getTransactionReceipt", undefined, () => inner.getTransactionReceipt(hash)),
   };
 }

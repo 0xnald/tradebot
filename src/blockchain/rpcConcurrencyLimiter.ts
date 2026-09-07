@@ -125,22 +125,47 @@ export class RpcConcurrencyLimiter {
  */
 export const DEFAULT_ROBINHOOD_RPC_MAX_CONCURRENCY = 4;
 
-function readConfiguredMaxConcurrency(): number {
-  const raw = process.env.ROBINHOOD_RPC_MAX_CONCURRENCY;
-  if (!raw) return DEFAULT_ROBINHOOD_RPC_MAX_CONCURRENCY;
+/**
+ * Phase 7.4 §7 — the PUBLIC LOG provider is a SEPARATE, rate-limited,
+ * unauthenticated endpoint carrying only large event-history queries (never
+ * the bulk of ordinary RPC traffic, which stays on PRIMARY) — a lower
+ * default keeps it from being hammered with concurrent big `eth_getLogs`
+ * scans while fresh-signal-critical reads proceed independently on PRIMARY.
+ * Configurable via `ROBINHOOD_LOG_RPC_MAX_CONCURRENCY`.
+ */
+export const DEFAULT_ROBINHOOD_LOG_RPC_MAX_CONCURRENCY = 2;
+
+export type RpcLimiterRole = "PRIMARY" | "LOG";
+
+function readConfiguredMaxConcurrency(role: RpcLimiterRole): number {
+  const envVar = role === "LOG" ? "ROBINHOOD_LOG_RPC_MAX_CONCURRENCY" : "ROBINHOOD_RPC_MAX_CONCURRENCY";
+  const fallback = role === "LOG" ? DEFAULT_ROBINHOOD_LOG_RPC_MAX_CONCURRENCY : DEFAULT_ROBINHOOD_RPC_MAX_CONCURRENCY;
+  const raw = process.env[envVar];
+  if (!raw) return fallback;
   const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed >= 1 ? Math.floor(parsed) : DEFAULT_ROBINHOOD_RPC_MAX_CONCURRENCY;
+  return Number.isFinite(parsed) && parsed >= 1 ? Math.floor(parsed) : fallback;
 }
 
-let globalLimiter: RpcConcurrencyLimiter | null = null;
+const globalLimiters: Partial<Record<RpcLimiterRole, RpcConcurrencyLimiter>> = {};
 
-/** The single shared instance every live intelligence branch must route Robinhood Chain RPC calls through — see the module doc comment for why a per-analyzer limiter would defeat the point. */
-export function getGlobalRpcLimiter(): RpcConcurrencyLimiter {
-  if (!globalLimiter) globalLimiter = new RpcConcurrencyLimiter(readConfiguredMaxConcurrency());
-  return globalLimiter;
+/**
+ * The single shared instance every live intelligence branch must route
+ * Robinhood Chain RPC calls through for a given provider role — see the
+ * module doc comment for why a per-analyzer limiter would defeat the
+ * point. Defaults to "PRIMARY" so every pre-Phase-7.4 call site (which
+ * never specifies a role) is unaffected.
+ */
+export function getGlobalRpcLimiter(role: RpcLimiterRole = "PRIMARY"): RpcConcurrencyLimiter {
+  if (!globalLimiters[role]) globalLimiters[role] = new RpcConcurrencyLimiter(readConfiguredMaxConcurrency(role));
+  return globalLimiters[role]!;
 }
 
-/** Test-only: resets the global limiter (picking up a possibly-changed env var, and clearing any queued state) so tests don't leak state into each other. */
-export function resetGlobalRpcLimiter(): void {
-  globalLimiter = null;
+/** Test-only: resets the global limiter(s) (picking up a possibly-changed env var, and clearing any queued state) so tests don't leak state into each other. Resets both roles when called with no argument. */
+export function resetGlobalRpcLimiter(role?: RpcLimiterRole): void {
+  if (role) {
+    delete globalLimiters[role];
+  } else {
+    delete globalLimiters.PRIMARY;
+    delete globalLimiters.LOG;
+  }
 }

@@ -1078,6 +1078,9 @@ export interface ScoreBreakdown {
  */
 export type DataQualityState = "KNOWN" | "UNKNOWN" | "UNAVAILABLE" | "STALE" | "PARTIAL";
 
+/** Phase 7.4 §14 — honest completeness of a bounded event-history (`eth_getLogs`) fetch specifically, distinct from (and additive to) `DataQualityState`. Never claims FULL just because zero events happened to be found by a fetch that didn't actually complete. */
+export type FlowCompleteness = "AVAILABLE_FULL" | "AVAILABLE_PARTIAL" | "UNAVAILABLE" | "TIMED_OUT" | "FAILED";
+
 /** A single field's data-quality state plus why, when it isn't KNOWN. */
 export interface DataQualityField {
   field: string;

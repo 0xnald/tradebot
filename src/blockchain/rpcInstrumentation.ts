@@ -7,11 +7,16 @@
 
 export type RpcCallStatus = "OK" | "ERROR" | "TIMEOUT";
 
+/** Phase 7.4 §2/§9 — which physical RPC endpoint actually served this call: the authenticated/primary provider, or the public log-only one. Defaults to "PRIMARY" for every call site that predates hybrid routing. */
+export type RpcProviderRoleTag = "PRIMARY" | "LOG";
+
 export interface RpcCallRecord {
   signalId: string | null;
   method: string;
   /** A human label for who initiated the call — e.g. "resolveMarketContextOnce", "PonsCurveMarketReader", "TokenAnalysisService:slow" — NOT the raw JSON-RPC method alone, since e.g. `getLogs` is used by several different callers with very different value/latency profiles (§4/§20). */
   caller: string;
+  /** Phase 7.4 §9 — the logical provider role this call was routed to (PRIMARY or LOG), independent of `caller`. */
+  role: RpcProviderRoleTag;
   startedAt: number;
   endedAt: number;
   durationMs: number;
@@ -22,6 +27,15 @@ export interface RpcCallRecord {
   concurrencyAtStart: number;
   blockRange?: { fromBlock: string; toBlock: string };
   error?: string;
+}
+
+export interface RpcRoleSummary {
+  totalRequests: number;
+  timeoutCount: number;
+  errorCount: number;
+  averageLatencyMs: number | null;
+  medianLatencyMs: number | null;
+  p95LatencyMs: number | null;
 }
 
 export interface RpcCallSummary {
@@ -36,6 +50,8 @@ export interface RpcCallSummary {
   averageLatencyMs: number | null;
   medianLatencyMs: number | null;
   p95LatencyMs: number | null;
+  /** Phase 7.4 §9 — per-provider-role breakdown (PRIMARY vs LOG), so a Scout decision report can show "primary RPC requests" / "log RPC requests" / provider-specific latency and failures separately, never averaged together. */
+  byRole: Record<RpcProviderRoleTag, RpcRoleSummary>;
   /** Same (caller, method, block range) requested more than once within the same signal — a literal duplicate-request candidate for §7's deduplication audit. */
   duplicateRequestGroups: { signalId: string; caller: string; method: string; count: number }[];
 }
@@ -75,6 +91,11 @@ export class RpcCallLog {
     let cacheHitCount = 0;
     let maxConcurrencyObserved = 0;
     const latencies: number[] = [];
+    const roleLatencies: Record<RpcProviderRoleTag, number[]> = { PRIMARY: [], LOG: [] };
+    const roleTotals: Record<RpcProviderRoleTag, { total: number; timeouts: number; errors: number }> = {
+      PRIMARY: { total: 0, timeouts: 0, errors: 0 },
+      LOG: { total: 0, timeouts: 0, errors: 0 },
+    };
 
     for (const r of this.#records) {
       const signalKey = r.signalId ?? "(no signal context)";
@@ -87,11 +108,28 @@ export class RpcCallLog {
       maxConcurrencyObserved = Math.max(maxConcurrencyObserved, r.concurrencyAtStart);
       if (!r.fromCache) latencies.push(r.durationMs);
 
+      roleTotals[r.role].total += 1;
+      if (r.status === "TIMEOUT") roleTotals[r.role].timeouts += 1;
+      if (r.status === "ERROR") roleTotals[r.role].errors += 1;
+      if (!r.fromCache) roleLatencies[r.role].push(r.durationMs);
+
       if (!r.fromCache) {
         const key = `${signalKey}::${r.caller}::${r.method}::${r.blockRange ? `${r.blockRange.fromBlock}-${r.blockRange.toBlock}` : ""}`;
         dupKey.set(key, (dupKey.get(key) ?? 0) + 1);
       }
     }
+
+    const summarizeRole = (role: RpcProviderRoleTag): RpcRoleSummary => {
+      const sortedRoleLatencies = [...roleLatencies[role]].sort((a, b) => a - b);
+      return {
+        totalRequests: roleTotals[role].total,
+        timeoutCount: roleTotals[role].timeouts,
+        errorCount: roleTotals[role].errors,
+        averageLatencyMs: sortedRoleLatencies.length > 0 ? sortedRoleLatencies.reduce((a, b) => a + b, 0) / sortedRoleLatencies.length : null,
+        medianLatencyMs: percentile(sortedRoleLatencies, 0.5),
+        p95LatencyMs: percentile(sortedRoleLatencies, 0.95),
+      };
+    };
 
     const sorted = [...latencies].sort((a, b) => a - b);
     const duplicateRequestGroups = [...dupKey.entries()]
@@ -113,6 +151,7 @@ export class RpcCallLog {
       averageLatencyMs: sorted.length > 0 ? sorted.reduce((a, b) => a + b, 0) / sorted.length : null,
       medianLatencyMs: percentile(sorted, 0.5),
       p95LatencyMs: percentile(sorted, 0.95),
+      byRole: { PRIMARY: summarizeRole("PRIMARY"), LOG: summarizeRole("LOG") },
       duplicateRequestGroups,
     };
   }

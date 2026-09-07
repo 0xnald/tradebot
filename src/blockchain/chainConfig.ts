@@ -97,6 +97,57 @@ export function loadChainConfigFromEnv(): ChainConfig {
 }
 
 /**
+ * Phase 7.4 §2 — the PUBLIC LOG RPC role: a second, independently-configured
+ * endpoint used only for bounded `eth_getLogs` event-history queries whose
+ * range exceeds what the PRIMARY/authenticated provider can serve (see
+ * `RpcProviderCapabilities` below and docs/RPC_PERFORMANCE.md for why this
+ * exists — the authenticated endpoint's Free-tier plan caps `eth_getLogs`
+ * at a flat 10 blocks, confirmed both by direct probing and by the
+ * provider's own error text). Defaults to the same documented public
+ * endpoint PRIMARY falls back to when unconfigured, since that endpoint has
+ * no known range cap and was verified (Phase 7.3B) to serve the corrected
+ * ~107,000/~2,974-block windows this project actually needs in the
+ * hundreds of milliseconds.
+ */
+export function loadLogChainConfigFromEnv(): ChainConfig {
+  return {
+    chainId: ROBINHOOD_MAINNET_CHAIN_ID,
+    rpcUrl: process.env.ROBINHOOD_CHAIN_LOG_RPC_URL || DEFAULT_MAINNET_RPC_URL,
+  };
+}
+
+/**
+ * Phase 7.4 §5 — describes what a provider CAN do, rather than hardcoding
+ * "Alchemy always means 10 blocks" into the routing logic itself. The
+ * PRIMARY provider's cap is read from `ROBINHOOD_PRIMARY_MAX_GETLOGS_RANGE`
+ * (defaulting to 10 — the CURRENT measured Alchemy Free-tier limit, Phase
+ * 7.3B) so upgrading the account's plan later only requires raising this
+ * env var, never a code change. Setting it to the literal string
+ * "unlimited" (case-insensitive) or "0" declares no known cap.
+ */
+export interface RpcProviderCapabilities {
+  /** Maximum `eth_getLogs` block-range (inclusive) this provider is known to accept in one request. `undefined` means no known cap. */
+  maxGetLogsBlockRange?: number;
+  supportsLargeGetLogs: boolean;
+}
+
+const DEFAULT_PRIMARY_MAX_GETLOGS_RANGE = 10;
+
+export function loadPrimaryRpcCapabilities(): RpcProviderCapabilities {
+  const raw = process.env.ROBINHOOD_PRIMARY_MAX_GETLOGS_RANGE;
+  if (raw === undefined || raw === "") return { maxGetLogsBlockRange: DEFAULT_PRIMARY_MAX_GETLOGS_RANGE, supportsLargeGetLogs: false };
+  if (raw.trim().toLowerCase() === "unlimited" || raw.trim() === "0") return { maxGetLogsBlockRange: undefined, supportsLargeGetLogs: true };
+  const parsed = Number(raw);
+  if (Number.isFinite(parsed) && parsed > 0) return { maxGetLogsBlockRange: Math.floor(parsed), supportsLargeGetLogs: false };
+  return { maxGetLogsBlockRange: DEFAULT_PRIMARY_MAX_GETLOGS_RANGE, supportsLargeGetLogs: false };
+}
+
+/** The PUBLIC LOG provider has no known range cap — verified (Phase 7.3B) up to ~2.19M blocks against the documented public endpoint. */
+export function logProviderCapabilities(): RpcProviderCapabilities {
+  return { maxGetLogsBlockRange: undefined, supportsLargeGetLogs: true };
+}
+
+/**
  * Phase 7.3A §1 — a SAFE description of which RPC endpoint is active, for
  * logging. Never returns the configured URL itself (which may embed an
  * API key as a path segment or query parameter) — only whether it's the
