@@ -204,15 +204,27 @@ export class PonsCurveMarketReader {
       };
     }
 
+    // Phase 7.4 §12/§B — resolved CONCURRENTLY, not one-at-a-time: with hybrid routing now actually
+    // returning real trade data (previously this never ran, since the getLogs fetch itself always
+    // failed first), a busy curve can have dozens of trades, and BlockTimestampResolver already
+    // de-duplicates concurrent requests for the SAME block via its own `#pending` map — sequentially
+    // awaiting each one was quietly the real latency bottleneck once the fetch itself started
+    // succeeding, easily exceeding the whole decision budget on its own. `Promise.all` preserves
+    // per-trade order (map order, not resolution order) and produces IDENTICAL values, just faster.
+    const resolvedTimestamps = await Promise.all(
+      trades.map(async (trade) => {
+        try {
+          return await this.#blockTimestampResolver.resolve(BigInt(trade.blockNumber));
+        } catch {
+          return undefined; // timestamp genuinely unavailable — the swap record still carries everything else known
+        }
+      }),
+    );
+
     const swaps: SwapRecord[] = [];
     const priceObservations: { blockNumber: number; timestamp: string | undefined; priceInQuote: number }[] = [];
-    for (const trade of trades) {
-      let timestamp: string | undefined;
-      try {
-        timestamp = await this.#blockTimestampResolver.resolve(BigInt(trade.blockNumber));
-      } catch {
-        timestamp = undefined; // timestamp genuinely unavailable — the swap record still carries everything else known
-      }
+    trades.forEach((trade, i) => {
+      const timestamp = resolvedTimestamps[i];
       swaps.push({
         chainId,
         poolAddress: curveAddress,
@@ -226,7 +238,7 @@ export class PonsCurveMarketReader {
         source: "pons-v2-curve",
       });
       priceObservations.push({ blockNumber: trade.blockNumber, timestamp, priceInQuote: tradePriceInQuote(trade, tokenDecimals, quoteDecimals) });
-    }
+    });
 
     const analyzer = new MarketFlowAnalyzer();
     const marketFlow = analyzer.analyze(chainId, curveAddress, swaps, quoteDecimals, now);

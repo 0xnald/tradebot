@@ -58,6 +58,8 @@ function record(events: LifecycleEvent[], providerCalls: LiveSignalRecord["provi
     decision: null,
     paperPositionId: null,
     providerCalls,
+    mode: "LIVE",
+    decisionPriceUsd: null,
   };
 }
 

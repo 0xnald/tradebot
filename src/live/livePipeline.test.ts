@@ -388,19 +388,44 @@ test("a WATCH decision is tracked for follow-up observation when a watchObservat
   });
 });
 
+test("Phase 7.4 §22: a legitimate TRADE_CANDIDATE is ALSO tracked for post-decision observation, alongside its normal paper entry", async () => {
+  await withTempDir(async (dir) => {
+    let currentTime = new Date("2026-09-06T12:00:05.000Z");
+    const { pipeline, push, watchObservationRepository } = makePipeline(dir, { withWatchObservations: true, now: () => currentTime });
+    await pipeline.start();
+    push(rawMessage("1"));
+    await waitUntil(() => pipeline.stats.processed === 1);
+    assert.equal(pipeline.stats.tradeCandidates, 1);
+    assert.equal(pipeline.stats.paperEntries, 1);
+    assert.equal(pipeline.watchedSignalCount, 1); // TRADE_CANDIDATE observed too, not just WATCH
+
+    currentTime = new Date(currentTime.getTime() + 61_000);
+    await pipeline.pollWatchedSignalsOnce();
+    const observations = await watchObservationRepository!.list();
+    assert.equal(observations.length, 1);
+    assert.equal(observations[0].horizonLabel, "1m");
+    // The paper position itself is untouched by this — observation is purely additive.
+    assert.equal(pipeline.openPositions.length, 1);
+    await pipeline.stop();
+  });
+});
+
 test("polling a WATCHed signal persists a real observation snapshot, opens no position, and never changes the original decision", async () => {
   await withTempDir(async (dir) => {
-    const { pipeline, push, watchObservationRepository } = makePipeline(dir, { engineConfig: WATCH_ONLY_ENGINE_CONFIG, withWatchObservations: true });
+    let currentTime = new Date("2026-09-06T12:00:05.000Z");
+    const { pipeline, push, watchObservationRepository } = makePipeline(dir, { engineConfig: WATCH_ONLY_ENGINE_CONFIG, withWatchObservations: true, now: () => currentTime });
     await pipeline.start();
     push(rawMessage("1"));
     await waitUntil(() => pipeline.stats.processed === 1);
 
+    currentTime = new Date(currentTime.getTime() + 61_000); // past the first (1m) post-decision horizon
     await pipeline.pollWatchedSignalsOnce();
 
     const observations = await watchObservationRepository!.list();
     assert.equal(observations.length, 1);
     assert.equal(observations[0].priceUsd, 0.06); // the real price resolvePrice returned
     assert.equal(observations[0].contractAddress, TOKEN);
+    assert.equal(observations[0].horizonLabel, "1m");
 
     // Still a WATCH, still no position — observation is purely additive, never a trade.
     assert.equal(pipeline.stats.tradeCandidates, 0);
@@ -411,12 +436,8 @@ test("polling a WATCHed signal persists a real observation snapshot, opens no po
   });
 });
 
-test("repeated polls of the same WATCHed signal append distinct observations, never overwrite one another", async () => {
+test("polls across multiple post-decision horizons (1m, 5m, 15m) append distinct observations, never overwrite one another", async () => {
   await withTempDir(async (dir) => {
-    // A real deployment's clock genuinely advances 30s+ between poll cycles (positionPollIntervalMs) —
-    // simulate that here, since a fixed/frozen clock would give every poll the same observedAt and
-    // collide on this repository's `${signalId}:${observedAt}` id (an artifact of a static test clock,
-    // not a real production scenario).
     let currentTime = new Date("2026-09-06T12:00:05.000Z");
     let callCount = 0;
     const { pipeline, push, watchObservationRepository } = makePipeline(dir, {
@@ -432,14 +453,16 @@ test("repeated polls of the same WATCHed signal append distinct observations, ne
     push(rawMessage("1"));
     await waitUntil(() => pipeline.stats.processed === 1);
 
+    currentTime = new Date(currentTime.getTime() + 61_000); // past 1m
     await pipeline.pollWatchedSignalsOnce();
-    currentTime = new Date(currentTime.getTime() + 30_000);
+    currentTime = new Date(currentTime.getTime() + 4 * 60_000); // past 5m
     await pipeline.pollWatchedSignalsOnce();
-    currentTime = new Date(currentTime.getTime() + 30_000);
+    currentTime = new Date(currentTime.getTime() + 10 * 60_000); // past 15m
     await pipeline.pollWatchedSignalsOnce();
 
     const observations = await watchObservationRepository!.list();
-    assert.equal(observations.length, 3); // three distinct polls, three distinct records
+    assert.equal(observations.length, 3); // three distinct horizons, three distinct records
+    assert.deepEqual(observations.map((o) => o.horizonLabel), ["1m", "5m", "15m"]);
     const distinctPrices = new Set(observations.map((o) => o.priceUsd));
     assert.equal(distinctPrices.size, 3);
 
@@ -487,13 +510,15 @@ test("a WATCHed signal stops being polled once it falls outside the observation 
 test("one broken watch observation does not stop observing the others", async () => {
   await withTempDir(async (dir) => {
     let calls = 0;
+    let currentTime = new Date("2026-09-06T12:00:05.000Z");
     const { pipeline, push, watchObservationRepository } = makePipeline(dir, {
       engineConfig: WATCH_ONLY_ENGINE_CONFIG,
       withWatchObservations: true,
+      now: () => currentTime,
       resolvePrice: async () => {
         calls += 1;
         if (calls === 1) throw new Error("provider exploded");
-        return { priceUsd: 0.07, liquidityUsd: 10000, source: "dexscreener", dataQuality: "KNOWN" as const, observedAt: new Date().toISOString(), venueType: "UNKNOWN" as const, venueIdentifier: null, providerCalls: [] };
+        return { priceUsd: 0.07, liquidityUsd: 10000, source: "dexscreener", dataQuality: "KNOWN" as const, observedAt: currentTime.toISOString(), venueType: "UNKNOWN" as const, venueIdentifier: null, providerCalls: [] };
       },
     });
     await pipeline.start();
@@ -502,6 +527,7 @@ test("one broken watch observation does not stop observing the others", async ()
     await waitUntil(() => pipeline.stats.processed === 2);
     assert.equal(pipeline.watchedSignalCount, 2);
 
+    currentTime = new Date(currentTime.getTime() + 61_000); // past the first (1m) post-decision horizon
     await pipeline.pollWatchedSignalsOnce(); // first watched signal's resolvePrice throws — must not stop the second
 
     const observations = await watchObservationRepository!.list();
@@ -515,7 +541,8 @@ test("one broken watch observation does not stop observing the others", async ()
 test("restart recovery restores an in-window WATCH signal and resumes observing it", async () => {
   await withTempDir(async (dir) => {
     const signalRepo = createLiveSignalRecordRepository(path.join(dir, "signals.ndjson"));
-    const now = () => new Date("2026-09-06T12:10:00.000Z");
+    let currentTime = new Date("2026-09-06T12:10:00.000Z"); // ~9m55s after the decision — past the 1m/5m horizons, before 15m
+    const now = () => currentTime;
     await signalRepo.save({
       signalId: "telegram:scoutrobinhood:watch-1",
       source: "telegram:scoutrobinhood",
@@ -537,6 +564,8 @@ test("restart recovery restores an in-window WATCH signal and resumes observing 
       decision: "WATCH",
       paperPositionId: null,
       providerCalls: [],
+      mode: "LIVE",
+      decisionPriceUsd: null,
     });
 
     const { pipeline, watchObservationRepository } = makePipeline(dir, { withWatchObservations: true, now });
@@ -544,11 +573,16 @@ test("restart recovery restores an in-window WATCH signal and resumes observing 
     assert.equal(recovery.recoveredSignals, 1);
     assert.equal(pipeline.watchedSignalCount, 1); // the old WATCH signal is still within its observation window
 
+    // The 1m/5m horizons already elapsed before this restart (§25 "where practical" — not re-fired);
+    // the next one due is 15m. Advance past it to confirm recovery actually resumes observing, not just
+    // recovers bookkeeping.
+    currentTime = new Date(currentTime.getTime() + 6 * 60_000);
     await pipeline.pollWatchedSignalsOnce();
     const observations = await watchObservationRepository!.list();
     assert.equal(observations.length, 1);
     assert.equal(observations[0].signalId, "telegram:scoutrobinhood:watch-1");
     assert.equal(observations[0].decidedScore, 60); // the ORIGINAL decision's score, never re-scored
+    assert.equal(observations[0].horizonLabel, "15m");
 
     await pipeline.stop();
   });
@@ -626,6 +660,8 @@ test("restart recovery: reloads dedup state and resumes monitoring previously-op
       decision: "TRADE_CANDIDATE",
       paperPositionId: "pos-old",
       providerCalls: [],
+      mode: "LIVE",
+      decisionPriceUsd: null,
     });
 
     const openPosition: LivePaperPosition = {

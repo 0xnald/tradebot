@@ -133,29 +133,37 @@ export class UniswapV4FlowReader {
 
     logs.sort((a, b) => Number(a.blockNumber) - Number(b.blockNumber));
 
+    // Phase 7.4 §12/§B — resolved CONCURRENTLY for the same reason as PonsCurveMarketReader: once
+    // hybrid routing lets a busy pool's getLogs actually succeed, resolving each trade's timestamp
+    // one at a time became the real bottleneck. BlockTimestampResolver de-duplicates concurrent
+    // requests for the same block itself.
+    const resolvedTimestamps = await Promise.all(
+      logs.map(async (log) => {
+        try {
+          return await this.#blockTimestampResolver.resolve(BigInt(log.blockNumber));
+        } catch {
+          return undefined;
+        }
+      }),
+    );
+
     const swaps: SwapRecord[] = [];
     const priceObservations: { blockNumber: number; timestamp: string | undefined; priceInQuote: number }[] = [];
     let unknownDirectionCount = 0;
     let latestPriceInQuote: number | null = null;
 
-    for (const log of logs) {
+    logs.forEach((log, i) => {
       const amount0 = log.args?.amount0 as bigint | undefined;
       const amount1 = log.args?.amount1 as bigint | undefined;
       const sqrtPriceX96 = log.args?.sqrtPriceX96 as bigint | undefined;
-      if (amount0 === undefined || amount1 === undefined) continue; // malformed event — excluded, never guessed
+      if (amount0 === undefined || amount1 === undefined) return; // malformed event — excluded, never guessed
 
       const side = classifyDirection(amount0, amount1, context.tokenIsCurrency0);
       if (side === "UNKNOWN") unknownDirectionCount += 1;
 
       const tokenAmountRaw = context.tokenIsCurrency0 ? amount0 : amount1;
       const quoteAmountRaw = context.tokenIsCurrency0 ? amount1 : amount0;
-
-      let timestamp: string | undefined;
-      try {
-        timestamp = await this.#blockTimestampResolver.resolve(BigInt(log.blockNumber));
-      } catch {
-        timestamp = undefined;
-      }
+      const timestamp = resolvedTimestamps[i];
 
       swaps.push({
         chainId,
@@ -179,7 +187,7 @@ export class UniswapV4FlowReader {
           latestPriceInQuote = priceInQuote;
         }
       }
-    }
+    });
 
     if (unknownDirectionCount > 0) notes.push(`${unknownDirectionCount}/${logs.length} swap(s) had a zero token-side amount and could not be classified as BUY/SELL — reported as UNKNOWN, not guessed`);
 

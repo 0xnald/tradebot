@@ -28,6 +28,8 @@ function record(overrides: Partial<LiveSignalRecord> = {}): LiveSignalRecord {
     decision: "TRADE_CANDIDATE",
     paperPositionId: "pos-1",
     providerCalls: [],
+    mode: "LIVE",
+    decisionPriceUsd: null,
     ...overrides,
   };
 }

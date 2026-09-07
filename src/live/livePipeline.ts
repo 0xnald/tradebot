@@ -23,6 +23,24 @@ const logger = createLogger("live-pipeline");
 /** Phase 7.2 §23 — how long to keep polling a WATCHed signal for follow-up observations after the decision was made. A WATCH is analytical, not a trade, so this is deliberately generous (long enough to see whether the setup developed) without polling forever. */
 const DEFAULT_WATCH_OBSERVATION_WINDOW_MS = 4 * 60 * 60 * 1000;
 
+/**
+ * Phase 7.4 §22 — fixed post-decision observation horizons. Unlike Phase
+ * 7.2's original continuous re-poll (every `positionPollIntervalMs`, for
+ * the whole observation window), each of these fires exactly ONCE per
+ * signal, as soon as a poll cycle notices it has become due — never held
+ * open waiting for it (§22's explicit instruction: "Do not hold the live
+ * decision open"). Order matters: ascending, so `#nextDueHorizonIndex`
+ * always advances forward.
+ */
+const POST_DECISION_HORIZONS: { label: string; ms: number }[] = [
+  { label: "1m", ms: 1 * 60 * 1000 },
+  { label: "5m", ms: 5 * 60 * 1000 },
+  { label: "15m", ms: 15 * 60 * 1000 },
+  { label: "30m", ms: 30 * 60 * 1000 },
+  { label: "1h", ms: 60 * 60 * 1000 },
+  { label: "4h", ms: 4 * 60 * 60 * 1000 },
+];
+
 export interface LivePipelineStats {
   received: number;
   processed: number;
@@ -40,6 +58,10 @@ interface WatchedSignal {
   decidedAt: string;
   decidedScore: number | null;
   decidedConfidence: number | null;
+  /** Phase 7.4 §22 — the price Smart Selection actually decided against; `returnFromDecisionPct` is always computed from this, never from a later observation. */
+  decisionPriceUsd: number | null;
+  /** Phase 7.4 §22 — how far through `POST_DECISION_HORIZONS` this signal has progressed. Equal to the array length once every horizon has fired — at that point the signal is dropped from `#watchedSignals` (see `#pollWatchedSignals`). */
+  nextHorizonIndex: number;
 }
 
 export interface LivePipelineOptions {
@@ -115,10 +137,16 @@ export class LivePipeline {
     const now = this.#options.positionMonitorDeps.now?.() ?? new Date();
     for (const record of existingRecords) {
       this.#processedSignalIds.add(record.signalId);
-      if (record.decision === "WATCH" && record.contractAddress) {
+      if ((record.decision === "WATCH" || record.decision === "TRADE_CANDIDATE") && record.contractAddress) {
         const decidedAtEvent = record.events.find((e) => e.stage === "PAPER_DECISION");
         const decidedAt = decidedAtEvent?.timestamp ?? record.receivedAt;
-        if (now.getTime() - new Date(decidedAt).getTime() < windowMs) {
+        const elapsedMs = now.getTime() - new Date(decidedAt).getTime();
+        // Phase 7.4 §25 "recover... where practical": a restart can't know which horizons were
+        // already recorded before it went down, so any horizon already due by elapsed time is
+        // treated as handled rather than re-fired on recovery — avoiding a duplicate observation is
+        // more important than guaranteeing zero gaps for a horizon that fell exactly during downtime.
+        const nextHorizonIndex = POST_DECISION_HORIZONS.filter((h) => elapsedMs >= h.ms).length;
+        if (elapsedMs < windowMs && nextHorizonIndex < POST_DECISION_HORIZONS.length) {
           this.#watchedSignals.set(record.signalId, {
             contractAddress: record.contractAddress,
             chainId: this.#options.signalProcessorDeps.intelligenceDeps.chainId,
@@ -126,6 +154,8 @@ export class LivePipeline {
             decidedAt,
             decidedScore: record.overallScore,
             decidedConfidence: record.confidence,
+            decisionPriceUsd: record.decisionPriceUsd,
+            nextHorizonIndex,
           });
         }
       }
@@ -232,10 +262,10 @@ export class LivePipeline {
     this.#recentRecords.push(record);
     if (this.#recentRecords.length > this.#maxRecentRecords) this.#recentRecords.shift();
 
-    // §23 — a WATCH decision is never re-scored and never becomes a trade; it just starts being
-    // observed for follow-up market snapshots. Only recorded here, at the moment of the real decision,
-    // never retroactively — see WatchObservation's doc comment.
-    if (record.decision === "WATCH" && record.contractAddress && this.#options.watchObservationRepository) {
+    // §22/§23 — WATCH or TRADE_CANDIDATE both start being observed for follow-up market snapshots at
+    // fixed horizons — never re-scored, never retroactively altering the original decision (see
+    // WatchObservation's doc comment). Recorded here, at the moment of the real decision, once.
+    if ((record.decision === "WATCH" || record.decision === "TRADE_CANDIDATE") && record.contractAddress && this.#options.watchObservationRepository) {
       const decidedAtEvent = record.events.find((e) => e.stage === "PAPER_DECISION");
       this.#watchedSignals.set(record.signalId, {
         contractAddress: record.contractAddress,
@@ -244,6 +274,8 @@ export class LivePipeline {
         decidedAt: decidedAtEvent?.timestamp ?? record.receivedAt,
         decidedScore: record.overallScore,
         decidedConfidence: record.confidence,
+        decisionPriceUsd: record.decisionPriceUsd,
+        nextHorizonIndex: 0,
       });
     }
   }
@@ -286,17 +318,25 @@ export class LivePipeline {
     const now = this.#options.positionMonitorDeps.now?.() ?? new Date();
 
     for (const [signalId, watched] of [...this.#watchedSignals]) {
-      if (now.getTime() - new Date(watched.decidedAt).getTime() >= windowMs) {
+      const elapsedMs = now.getTime() - new Date(watched.decidedAt).getTime();
+      if (elapsedMs >= windowMs || watched.nextHorizonIndex >= POST_DECISION_HORIZONS.length) {
         this.#watchedSignals.delete(signalId);
         continue;
       }
+
+      // §22 — fires the horizon due, and ONLY that one, this cycle; never held open waiting, and
+      // never fires more than one horizon per poll even if several elapsed at once while the process
+      // was busy — each subsequent cycle catches up one horizon at a time.
+      const dueHorizon = POST_DECISION_HORIZONS[watched.nextHorizonIndex];
+      if (elapsedMs < dueHorizon.ms) continue;
 
       try {
         const resolvePrice = this.#options.watchResolvePrice ?? this.#options.positionMonitorDeps.resolvePrice;
         const price = await resolvePrice(watched.contractAddress, watched.chainId);
         const observedAt = now.toISOString();
+        const returnFromDecisionPct = watched.decisionPriceUsd && price.priceUsd ? ((price.priceUsd - watched.decisionPriceUsd) / watched.decisionPriceUsd) * 100 : null;
         const observation: WatchObservation = {
-          id: `${signalId}:${observedAt}`,
+          id: `${signalId}:${dueHorizon.label}`,
           signalId,
           contractAddress: watched.contractAddress,
           tokenSymbol: watched.tokenSymbol,
@@ -308,11 +348,15 @@ export class LivePipeline {
           liquidityUsd: price.liquidityUsd,
           venueType: price.venueType,
           dataQuality: price.dataQuality,
+          horizonLabel: dueHorizon.label,
+          returnFromDecisionPct,
         };
         await repository.save(observation);
+        this.#watchedSignals.set(signalId, { ...watched, nextHorizonIndex: watched.nextHorizonIndex + 1 });
       } catch (error) {
         // One broken watch observation must never stop observing the others (§18's principle, applied here too).
-        logger.error("failed to poll watched signal", { signalId, error: error instanceof Error ? error.message : String(error) });
+        // The horizon is NOT advanced on failure — the next poll cycle retries the same due horizon.
+        logger.error("failed to poll watched signal", { signalId, horizon: dueHorizon.label, error: error instanceof Error ? error.message : String(error) });
       }
     }
   }

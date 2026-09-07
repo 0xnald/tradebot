@@ -13,7 +13,7 @@ import { openPaperPosition } from "./paperTradingEngine.js";
 import type { PaperPortfolio } from "./paperPortfolio.js";
 import type { SmartSelectionEngine } from "../scoring/smartSelectionEngine.js";
 import type { RawScoutMessage } from "../ingestion/types.js";
-import type { LivePaperPosition, LiveProviderCallSummary, LiveSignalRecord, ScoutSignal, SignalRejectionReason } from "../types/domain.js";
+import type { LivePaperPosition, LiveProviderCallSummary, LiveRunMode, LiveSignalRecord, ScoutSignal, SignalRejectionReason } from "../types/domain.js";
 
 export interface SignalProcessorDeps {
   source: string;
@@ -26,6 +26,8 @@ export interface SignalProcessorDeps {
   maxSignalAgeSecondsForEntry: number;
   now?: () => Date;
   onPositionOpened?: (position: LivePaperPosition) => Promise<void>;
+  /** Phase 7.4 §29 — REPLAY vs genuine LIVE Scout activity, persisted onto every record this call produces. Defaults to "LIVE" (matching every pre-Phase-7.4 caller, which never ran replay through this path — replay was always the ONLY mode `npm run live` used before real Telegram credentials existed). */
+  mode?: LiveRunMode;
 }
 
 function buildRecord(
@@ -54,6 +56,8 @@ function buildRecord(
     decision: null,
     paperPositionId: null,
     providerCalls: [],
+    mode: "LIVE",
+    decisionPriceUsd: null,
     ...overrides,
   };
 }
@@ -129,6 +133,8 @@ export async function processRawMessage(raw: RawScoutMessage, deps: SignalProces
     dataQuality: result.dataQuality,
     decision: result.decision,
     providerCalls,
+    mode: deps.mode ?? "LIVE",
+    decisionPriceUsd: intelligence.currentPrice.priceUsd,
   };
 
   if (result.decision !== "TRADE_CANDIDATE") {

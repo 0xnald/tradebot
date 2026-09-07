@@ -21,6 +21,7 @@ import { RobinhoodChainClient } from "../src/blockchain/robinhoodChainClient.js"
 import { BlockTimestampResolver } from "../src/blockchain/blockTimestampResolver.js";
 import { BlockTimeEstimator } from "../src/blockchain/blockTimeEstimator.js";
 import { wrapChainClientWithRpcControl } from "../src/blockchain/instrumentedChainClient.js";
+import { loadLogChainConfigFromEnv, loadPrimaryRpcCapabilities } from "../src/blockchain/chainConfig.js";
 import { UniswapV3PoolProvider } from "../src/market-data/uniswapV3PoolProvider.js";
 import { PonsV2Provider } from "../src/market-data/ponsV2Provider.js";
 import { CachingPonsV2Provider } from "../src/market-data/cachingPonsV2Provider.js";
@@ -66,9 +67,12 @@ async function main(): Promise<void> {
     resetGlobalRpcCallLog();
 
     const chainClient = new RobinhoodChainClient();
-    const criticalChainClient = wrapChainClientWithRpcControl(chainClient, { caller: "single-signal-control", priority: "CRITICAL" }) as unknown as RobinhoodChainClient;
+    const criticalChainClient = wrapChainClientWithRpcControl(chainClient, { caller: "single-signal-control", priority: "CRITICAL", role: "PRIMARY" }) as unknown as RobinhoodChainClient;
+    const logChainClientRaw = new RobinhoodChainClient({ config: loadLogChainConfigFromEnv() });
+    const logChainClient = wrapChainClientWithRpcControl(logChainClientRaw, { caller: "single-signal-control:log", priority: "CRITICAL", role: "LOG" }) as unknown as RobinhoodChainClient;
+    const primaryCapabilities = loadPrimaryRpcCapabilities();
     const poolDataProvider = new UniswapV3PoolProvider({ chainClient: criticalChainClient });
-    const ponsV2Provider = new CachingPonsV2Provider(new PonsV2Provider({ chainClient: criticalChainClient }));
+    const ponsV2Provider = new CachingPonsV2Provider(new PonsV2Provider({ chainClient: criticalChainClient, logChainClient, primaryCapabilities }));
     const geckoTerminalProvider = new GeckoTerminalHistoricalPriceProvider();
     const marketDataProvider = new DexScreenerMarketDataProvider();
     const tokenAnalysisService = new TokenAnalysisService({ chainClient: criticalChainClient, holderProvider: new BlockscoutHolderDataProvider() });
@@ -84,7 +88,7 @@ async function main(): Promise<void> {
     const record = await runWithSignalContext(`${SOURCE}:${message.id}`, () =>
       processRawMessage(message, {
         source: SOURCE,
-        intelligenceDeps: { poolDataProvider, ponsV2Provider, geckoTerminalProvider, onChain, marketDataProvider, tokenAnalysisService, chainId: chainClient.chainId, timeoutMs: PROVIDER_TIMEOUT_MS },
+        intelligenceDeps: { poolDataProvider, ponsV2Provider, geckoTerminalProvider, onChain, marketDataProvider, tokenAnalysisService, chainId: chainClient.chainId, timeoutMs: PROVIDER_TIMEOUT_MS, logChainClient, primaryRpcCapabilities: primaryCapabilities },
         smartSelectionEngine: new SmartSelectionEngine(SMART_SELECTION_V1_CONFIG),
         portfolio,
         generatePositionId: () => crypto.randomUUID(),

@@ -513,6 +513,9 @@ export interface ScoutWalletAssociation {
  */
 export type SmartSelectionDecision = "IGNORE" | "WATCH" | "TRADE_CANDIDATE";
 
+/** Phase 7.4 §29 — every persisted live record carries its own source explicitly, so REPLAY and genuine LIVE Scout activity are never mixed in one statistic (reports must filter/separate by this field). */
+export type LiveRunMode = "REPLAY" | "LIVE";
+
 /**
  * One feature's contribution to a group score — always raw value,
  * normalized [0,1] value, weight, contribution (normalized*weight), and a
@@ -1437,6 +1440,10 @@ export interface LiveSignalRecord {
   paperPositionId: string | null;
   /** One entry per external call made while processing this signal — the raw material for per-provider latency stats (Phase 7 §16). */
   providerCalls: LiveProviderCallSummary[];
+  /** Phase 7.4 §29 — REPLAY (the captured fixture) vs genuine LIVE Scout Telegram activity. Reports must never combine statistics across the two. */
+  mode: LiveRunMode;
+  /** Phase 7.4 §21/§22 — the USD price Smart Selection actually decided against, captured once at decision time (never updated later) — the baseline post-decision observations (`WatchObservation.returnFromDecisionPct`) compute their return from. `null` when no price was resolved at all. */
+  decisionPriceUsd: number | null;
 }
 
 /** Live provider-call timeout/degradation outcome — never a fabricated value, always an explicit status. */
@@ -1556,6 +1563,10 @@ export interface WatchObservation {
   liquidityUsd: number | null;
   venueType: MarketVenueType;
   dataQuality: DataQualityState;
+  /** Phase 7.4 §22 — which fixed post-decision horizon this observation corresponds to ("1m"/"5m"/"15m"/"30m"/"1h"/"4h"), or `null` for the original Phase 7.2 continuous-poll behavior (pre-Phase-7.4 records, or a caller that never configured fixed horizons). */
+  horizonLabel: string | null;
+  /** Phase 7.4 §22 — `(priceUsd - decisionPriceUsd) / decisionPriceUsd * 100`, computed from the ORIGINAL decision price (see `LiveSignalRecord.decisionPriceUsd`) — never re-derived from a later observation. `null` when either price is unavailable. */
+  returnFromDecisionPct: number | null;
 }
 
 export interface LatencyStats {
