@@ -171,6 +171,18 @@ test("a PERFORMANCE_UPDATE message is rejected and never reaches Smart Selection
   assert.equal(record.paperPositionId, null);
 });
 
+test("Phase 7.4 §29 regression: an early-rejected record (PERFORMANCE_UPDATE) still carries the caller's configured mode, not the default", async () => {
+  const deps = baseDeps({ mode: "REPLAY" });
+  const record = await processRawMessage(performanceUpdateMessage(), deps);
+  assert.equal(record.mode, "REPLAY");
+});
+
+test("defaults to LIVE mode when the caller never specifies one", async () => {
+  const deps = baseDeps();
+  const record = await processRawMessage(performanceUpdateMessage(), deps);
+  assert.equal(record.mode, "LIVE");
+});
+
 test("a message with no recoverable contract address is rejected before intelligence gathering", async () => {
   const deps = baseDeps();
   const record = await processRawMessage(rawMessage({ buttons: [] }), deps);

@@ -13,7 +13,7 @@ import type { HistoricalPriceProvider, HistoricalCandle } from "../backtesting/h
 import type { TokenIntelligenceProvider } from "../token-analysis/tokenAnalysisService.js";
 import type { ScoutIngestionAdapter, RawScoutMessage } from "../ingestion/types.js";
 import type { CurrentPriceResult } from "./currentPriceResolver.js";
-import type { LivePaperPosition, PaperPortfolioConfig, PoolInfo, ProviderResult, TokenContractInfo, TokenMarketData } from "../types/domain.js";
+import type { LivePaperPosition, LiveSignalRecord, PaperPortfolioConfig, PoolInfo, ProviderResult, TokenContractInfo, TokenMarketData } from "../types/domain.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -136,6 +136,7 @@ function makePipeline(
     withWatchObservations?: boolean;
     watchObservationWindowMs?: number;
     resolvePrice?: () => Promise<CurrentPriceResult>;
+    onRecordProcessed?: (record: LiveSignalRecord) => void;
   } = {},
 ) {
   const { adapter, push } = fakeAdapter();
@@ -182,6 +183,7 @@ function makePipeline(
     portfolio,
     maxConcurrentSignals: opts.maxConcurrentSignals ?? 3,
     positionPollIntervalMs: 999_999_999, // never fires on its own — tests trigger polls manually
+    onRecordProcessed: opts.onRecordProcessed,
   });
 
   return { pipeline, push, watchObservationRepository };
@@ -794,6 +796,20 @@ test("waitForIdle resolves immediately when there is no in-flight work", async (
     const { pipeline } = makePipeline(dir);
     await pipeline.start();
     await pipeline.waitForIdle(); // must not hang with nothing pending
+    await pipeline.stop();
+  });
+});
+
+test("Phase 7.4 §20: onRecordProcessed fires with the final record for every processed signal", async () => {
+  await withTempDir(async (dir) => {
+    const received: LiveSignalRecord[] = [];
+    const { pipeline, push } = makePipeline(dir, { onRecordProcessed: (r) => received.push(r) });
+    await pipeline.start();
+    push(rawMessage("1"));
+    await waitUntil(() => pipeline.stats.processed === 1);
+    assert.equal(received.length, 1);
+    assert.equal(received[0].signalId, "telegram:scoutrobinhood:1");
+    assert.equal(received[0].decision, "TRADE_CANDIDATE");
     await pipeline.stop();
   });
 });

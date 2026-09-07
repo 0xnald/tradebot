@@ -94,6 +94,8 @@ export interface LivePipelineOptions {
   portfolio: PaperPortfolio;
   maxConcurrentSignals: number;
   positionPollIntervalMs: number;
+  /** Phase 7.4 §20 — an optional hook fired with every processed signal's final record, for a caller that wants a concise per-signal status line (e.g. scripts/liveScout.ts's `[SCOUT] ...` output). Never affects processing itself — purely observational. */
+  onRecordProcessed?: (record: LiveSignalRecord) => void;
 }
 
 export class LivePipeline {
@@ -254,6 +256,7 @@ export class LivePipeline {
 
     await this.#options.signalRecordRepository.save(record);
     this.#recordProcessed(record);
+    this.#options.onRecordProcessed?.(record);
   }
 
   #recordProcessed(record: LiveSignalRecord): void {

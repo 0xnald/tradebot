@@ -43,7 +43,43 @@ import { createLiveSignalRecordRepository, DEFAULT_LIVE_SIGNAL_RECORDS_PATH } fr
 import { createLivePaperPositionRepository, DEFAULT_LIVE_PAPER_POSITIONS_PATH } from "../src/storage/livePaperPositionRepository.js";
 import { createWatchObservationRepository, DEFAULT_WATCH_OBSERVATIONS_PATH } from "../src/storage/watchObservationRepository.js";
 import type { ScoutIngestionAdapter } from "../src/ingestion/types.js";
-import type { PaperPortfolioConfig } from "../src/types/domain.js";
+import type { LiveSignalRecord, PaperPortfolioConfig } from "../src/types/domain.js";
+
+/**
+ * Phase 7.4 §20 — a concise per-eligible-call status line. PERFORMANCE_UPDATE and other non-EARLY_CALL
+ * messages get a one-line note instead (they never originate a decision — see the Scout-only-origin
+ * invariant in ARCHITECTURE.md). Never prints anything that could expose a secret — everything here
+ * comes from the already-public Scout message and this system's own computed decision.
+ */
+function logScoutStatusLine(record: LiveSignalRecord): void {
+  if (record.rejectionReason === "PERFORMANCE_UPDATE_NOT_A_CALL") {
+    console.log(`[SCOUT] performance update for a prior call (message ${record.sourceMessageId}) — not a new opportunity, ignored`);
+    return;
+  }
+  if (!record.decision) {
+    console.log(`[SCOUT] ${record.tokenSymbol ?? "?"} — not eligible (${record.rejectionReason ?? record.currentStage})`);
+    return;
+  }
+  const receivedEvent = record.events.find((e) => e.stage === "RECEIVED");
+  const decisionEvent = record.events.find((e) => e.stage === "PAPER_DECISION");
+  const latencyMs = receivedEvent && decisionEvent ? new Date(decisionEvent.timestamp).getTime() - new Date(receivedEvent.timestamp).getTime() : null;
+  const flowField = record.dataQuality?.fields.find((f) => f.field === "marketFlow");
+  console.log(
+    [
+      "[SCOUT]",
+      `token: ${record.tokenSymbol ?? "?"}`,
+      `received: ${record.receivedAt}`,
+      `venue: ${record.venueType ?? "UNKNOWN"}`,
+      `price: ${record.decisionPriceUsd !== null ? `$${record.decisionPriceUsd}` : "n/a"}`,
+      `flow: ${flowField?.state ?? "n/a"}`,
+      `confidence: ${record.confidence ?? "n/a"}`,
+      `score: ${record.overallScore ?? "n/a"}`,
+      `decision: ${record.decision}`,
+      `latency: ${latencyMs ?? "n/a"}ms`,
+      `paper_position: ${record.paperPositionId ?? "none"}`,
+    ].join("  "),
+  );
+}
 
 const logger = createLogger("live-scout");
 const SOURCE = "telegram:scoutrobinhood";
@@ -200,6 +236,10 @@ async function main(): Promise<void> {
       portfolio,
       generatePositionId: () => crypto.randomUUID(),
       maxSignalAgeSecondsForEntry: PORTFOLIO_CONFIG.maxSignalAgeSecondsForEntry,
+      // Phase 7.4 §29 — every record this run produces is tagged REPLAY or LIVE explicitly, so a
+      // later report can never accidentally combine fixture-replay statistics with genuine Scout
+      // activity.
+      mode: isReplay ? "REPLAY" : "LIVE",
     },
     signalRecordRepository,
     paperPositionRepository,
@@ -221,6 +261,7 @@ async function main(): Promise<void> {
     portfolio,
     maxConcurrentSignals: MAX_CONCURRENT_SIGNALS,
     positionPollIntervalMs: POSITION_POLL_INTERVAL_MS,
+    onRecordProcessed: logScoutStatusLine,
   });
 
   logger.info("starting live pipeline", { source: SOURCE, isReplay, portfolioConfig: PORTFOLIO_CONFIG, maxConcurrentSignals: MAX_CONCURRENT_SIGNALS, positionPollIntervalMs: POSITION_POLL_INTERVAL_MS });

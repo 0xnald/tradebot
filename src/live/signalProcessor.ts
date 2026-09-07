@@ -89,7 +89,7 @@ export async function processRawMessage(raw: RawScoutMessage, deps: SignalProces
 
   const reject = (reason: SignalRejectionReason): LiveSignalRecord => {
     tracker.record("REJECTED", "SKIPPED", { at: deps.now?.() ?? new Date(), details: { reason } });
-    return buildRecord(tracker, signalMeta, { rejectionReason: reason });
+    return buildRecord(tracker, signalMeta, { rejectionReason: reason, mode: deps.mode ?? "LIVE" });
   };
 
   if (scoutSignal.messageType === "PERFORMANCE_UPDATE") {

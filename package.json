@@ -17,6 +17,8 @@
     "backtest": "tsx --env-file-if-exists=.env scripts/backtest.ts",
     "backtest:report": "tsx scripts/backtestReport.ts",
     "live": "tsx --env-file-if-exists=.env scripts/liveScout.ts",
+    "live:status": "tsx scripts/liveStatus.ts",
+    "live:report": "tsx scripts/liveReport.ts",
     "rpc:benchmark": "tsx --env-file-if-exists=.env scripts/rpcProviderBenchmark.ts"
   },
   "dependencies": {
