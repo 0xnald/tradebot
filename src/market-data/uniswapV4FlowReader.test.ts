@@ -141,7 +141,64 @@ test("degrades gracefully (no crash) when the underlying event fetch throws", as
   const reader = new UniswapV4FlowReader({ chainClient, blockTimestampResolver: fakeBlockTimestampResolver() });
   const result = await reader.getRecentFlow(CHAIN_ID, context(), 0n, 1000n);
   assert.equal(result.dataQuality, "UNAVAILABLE");
-  assert.ok(result.notes.some((n) => n.includes("failed")));
+  assert.equal(result.flowCompleteness, "FAILED");
+  assert.ok(result.notes.some((n) => n.includes("did not complete")));
+});
+
+// --- Phase 7.4 §11/§31: hybrid RPC routing for the V4 Swap event fetch ---
+
+const CAPPED_AT_10 = { maxGetLogsBlockRange: 10, supportsLargeGetLogs: false };
+
+test("getRecentFlow: a small range stays on the primary client", async () => {
+  let logClientCalled = false;
+  const chainClient = fakeChainClient({ getLogs: async () => [swapLog({ blockNumber: 100n })] });
+  const logChainClient = fakeChainClient({
+    getLogs: async () => {
+      logClientCalled = true;
+      throw new Error("log client should not have been used for a small range");
+    },
+  });
+  const reader = new UniswapV4FlowReader({ chainClient, logChainClient, primaryCapabilities: CAPPED_AT_10, blockTimestampResolver: fakeBlockTimestampResolver() });
+  const result = await reader.getRecentFlow(CHAIN_ID, context(), 0n, 9n);
+  assert.equal(result.dataQuality, "KNOWN");
+  assert.equal(result.providerRole, "PRIMARY");
+  assert.equal(logClientCalled, false);
+});
+
+test("getRecentFlow: a large range (the real Phase 7.3B corrected THROBBIN V4 window) routes to the log client — primary never attempted", async () => {
+  let primaryCalled = false;
+  const chainClient = fakeChainClient({
+    getLogs: async () => {
+      primaryCalled = true;
+      throw new Error("primary should not have been attempted");
+    },
+  });
+  const logChainClient = fakeChainClient({ getLogs: async () => [swapLog({ blockNumber: 54_525_700n })] });
+  const reader = new UniswapV4FlowReader({ chainClient, logChainClient, primaryCapabilities: CAPPED_AT_10, blockTimestampResolver: fakeBlockTimestampResolver() });
+  const result = await reader.getRecentFlow(CHAIN_ID, context(), 54_525_667n, 54_528_641n);
+  assert.equal(result.dataQuality, "KNOWN");
+  assert.equal(result.providerRole, "LOG");
+  assert.equal(primaryCalled, false);
+});
+
+test("getRecentFlow: preserves currency0/currency1 direction classification identically regardless of provider role", async () => {
+  const sameFetch = async () => [swapLog({ blockNumber: 100n, amount0: -1000n, amount1: 1000n })]; // token (currency0) leaves pool => BUY
+  const viaPrimary = new UniswapV4FlowReader({ chainClient: fakeChainClient({ getLogs: sameFetch }), primaryCapabilities: CAPPED_AT_10, blockTimestampResolver: fakeBlockTimestampResolver() });
+  const viaLog = new UniswapV4FlowReader({
+    chainClient: fakeChainClient({ getLogs: async () => { throw new Error("must not be called"); } }),
+    logChainClient: fakeChainClient({ getLogs: sameFetch }),
+    primaryCapabilities: CAPPED_AT_10,
+    blockTimestampResolver: fakeBlockTimestampResolver(),
+  });
+
+  const small = await viaPrimary.getRecentFlow(CHAIN_ID, context({ tokenIsCurrency0: true }), 0n, 9n);
+  const large = await viaLog.getRecentFlow(CHAIN_ID, context({ tokenIsCurrency0: true }), 0n, 1000n);
+
+  assert.equal(small.providerRole, "PRIMARY");
+  assert.equal(large.providerRole, "LOG");
+  assert.equal(small.swaps[0].side, "BUY");
+  assert.equal(large.swaps[0].side, "BUY");
+  assert.deepEqual(small.swaps, large.swaps);
 });
 
 test("real BUY/SELL observations feed the existing, unmodified MarketFlowAnalyzer", async () => {

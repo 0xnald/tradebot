@@ -21,12 +21,14 @@
 // against a busy curve took 150+ seconds) fails fast into
 // partial/unavailable rather than stalling the Scout decision.
 
-import { fetchLogsWithAdaptiveChunking } from "../blockchain/logRangeChunking.js";
+import { fetchLogsHybrid } from "../blockchain/hybridLogFetcher.js";
 import { convertToUsd } from "../backtesting/quoteAssetUsdPricing.js";
 import { PONS_V2_CURVE_ABI } from "./ponsV2Abi.js";
 import type { RobinhoodChainClient } from "../blockchain/robinhoodChainClient.js";
 import type { BlockTimestampResolver } from "../blockchain/blockTimestampResolver.js";
-import type { DataQualityState, MarketFlowAnalysis, SwapRecord } from "../types/domain.js";
+import { loadPrimaryRpcCapabilities, type RpcProviderCapabilities } from "../blockchain/chainConfig.js";
+import type { RpcProviderRole } from "../blockchain/rpcRouting.js";
+import type { DataQualityState, FlowCompleteness, MarketFlowAnalysis, SwapRecord } from "../types/domain.js";
 import { MarketFlowAnalyzer } from "./marketFlowAnalyzer.js";
 
 const MAX_SPLIT_DEPTH = 3;
@@ -34,6 +36,10 @@ const MAX_SPLIT_DEPTH = 3;
 export interface PonsCurveMarketReaderOptions {
   chainClient: RobinhoodChainClient;
   blockTimestampResolver: BlockTimestampResolver;
+  /** Phase 7.4 §10 — a separate client used ONLY for the CurveBuy/CurveSell event fetch when the requested range exceeds `primaryCapabilities`'s known cap (routed via `chooseRpcForLogQuery`). Defaults to `chainClient`, so a caller that never sets this up (e.g. an existing test) gets exactly the pre-Phase-7.4 single-provider behavior. */
+  logChainClient?: RobinhoodChainClient;
+  /** Phase 7.4 §5 — `chainClient`'s known eth_getLogs range cap. Defaults to `loadPrimaryRpcCapabilities()` (the current measured Alchemy Free-tier limit); pass an explicit value in tests rather than relying on env vars. */
+  primaryCapabilities?: RpcProviderCapabilities;
 }
 
 export interface PonsCurveTrade {
@@ -68,52 +74,54 @@ export interface PonsCurveFlowResult {
   swaps: SwapRecord[];
   priceObservations: { blockNumber: number; timestamp: string | undefined; priceInQuote: number }[];
   dataQuality: DataQualityState;
+  /** Phase 7.4 §14 — honest completeness of the underlying event fetch (never "FULL" just because the window happened to contain zero trades from a failed/partial fetch — see `fetchCurveTrades`). */
+  flowCompleteness: FlowCompleteness;
+  /** Phase 7.4 §9/§10 — which provider role actually served the CurveBuy/CurveSell fetch. */
+  providerRole: RpcProviderRole;
   notes: string[];
 }
 
-/** Fetches CurveBuy+CurveSell once for [fromBlock, toBlock] — shared by price/liquidity-adjacent/flow so no caller pays for the same event scan twice. */
+/** Fetches CurveBuy+CurveSell once for [fromBlock, toBlock] — shared by price/liquidity-adjacent/flow so no caller pays for the same event scan twice. Phase 7.4 §10: routes each event fetch to PRIMARY or LOG per `chooseRpcForLogQuery`, deciding BEFORE either request is made — never "try primary first." */
 async function fetchCurveTrades(
   chainClient: RobinhoodChainClient,
+  logChainClient: RobinhoodChainClient,
+  primaryCapabilities: RpcProviderCapabilities,
   curveAddress: string,
   fromBlock: bigint,
   toBlock: bigint,
-): Promise<{ trades: PonsCurveTrade[]; notes: string[] }> {
+): Promise<{ trades: PonsCurveTrade[]; notes: string[]; completeness: FlowCompleteness; providerRole: RpcProviderRole }> {
   const notes: string[] = [];
-  try {
-    const [buyLogs, sellLogs] = await Promise.all([
-      fetchLogsWithAdaptiveChunking(
-        (from, to) => chainClient.getLogs({ address: curveAddress as `0x${string}`, event: PONS_V2_CURVE_ABI[0], fromBlock: from, toBlock: to }),
-        fromBlock,
-        toBlock,
-        MAX_SPLIT_DEPTH,
-      ),
-      fetchLogsWithAdaptiveChunking(
-        (from, to) => chainClient.getLogs({ address: curveAddress as `0x${string}`, event: PONS_V2_CURVE_ABI[1], fromBlock: from, toBlock: to }),
-        fromBlock,
-        toBlock,
-        MAX_SPLIT_DEPTH,
-      ),
-    ]);
+  const clients = { primary: chainClient, log: logChainClient };
+  const routing = { purpose: "PONS_CURVE_FLOW" as const, primaryCapabilities };
 
-    const trades: PonsCurveTrade[] = [];
-    for (const log of buyLogs as any[]) {
-      const quoteIn = log.args?.quoteIn as bigint | undefined;
-      const tokensOut = log.args?.tokensOut as bigint | undefined;
-      if (quoteIn === undefined || tokensOut === undefined || tokensOut <= 0n) continue; // malformed/zero -> excluded, never guessed
-      trades.push({ blockNumber: Number(log.blockNumber), transactionHash: log.transactionHash, side: "BUY", quoteAmountRaw: quoteIn, tokenAmountRaw: tokensOut, buyerOrSeller: (log.args?.buyer as string) ?? null });
-    }
-    for (const log of sellLogs as any[]) {
-      const tokensIn = log.args?.tokensIn as bigint | undefined;
-      const quoteOut = log.args?.quoteOut as bigint | undefined;
-      if (tokensIn === undefined || quoteOut === undefined || tokensIn <= 0n) continue;
-      trades.push({ blockNumber: Number(log.blockNumber), transactionHash: log.transactionHash, side: "SELL", quoteAmountRaw: quoteOut, tokenAmountRaw: tokensIn, buyerOrSeller: (log.args?.seller as string) ?? null });
-    }
-    trades.sort((a, b) => a.blockNumber - b.blockNumber);
-    return { trades, notes };
-  } catch (error) {
-    notes.push(`curve event fetch failed within the requested bounded window: ${error instanceof Error ? error.message : String(error)}`);
-    return { trades: [], notes };
+  const [buyOutcome, sellOutcome] = await Promise.all([
+    fetchLogsHybrid(clients, { address: curveAddress as `0x${string}`, event: PONS_V2_CURVE_ABI[0], fromBlock, toBlock }, routing, MAX_SPLIT_DEPTH),
+    fetchLogsHybrid(clients, { address: curveAddress as `0x${string}`, event: PONS_V2_CURVE_ABI[1], fromBlock, toBlock }, routing, MAX_SPLIT_DEPTH),
+  ]);
+
+  const providerRole = buyOutcome.providerRole; // identical for both — same [fromBlock, toBlock], so the same routing decision
+  if (buyOutcome.status !== "OK" || sellOutcome.status !== "OK") {
+    const failed = buyOutcome.status !== "OK" ? buyOutcome : sellOutcome;
+    notes.push(`curve event fetch (${providerRole}) did not complete within the requested bounded window: ${failed.reason ?? failed.status}`);
+    const completeness: FlowCompleteness = failed.status === "TIMED_OUT" ? "TIMED_OUT" : failed.status === "UNAVAILABLE" ? "UNAVAILABLE" : "FAILED";
+    return { trades: [], notes, completeness, providerRole };
   }
+
+  const trades: PonsCurveTrade[] = [];
+  for (const log of buyOutcome.data as any[]) {
+    const quoteIn = log.args?.quoteIn as bigint | undefined;
+    const tokensOut = log.args?.tokensOut as bigint | undefined;
+    if (quoteIn === undefined || tokensOut === undefined || tokensOut <= 0n) continue; // malformed/zero -> excluded, never guessed
+    trades.push({ blockNumber: Number(log.blockNumber), transactionHash: log.transactionHash, side: "BUY", quoteAmountRaw: quoteIn, tokenAmountRaw: tokensOut, buyerOrSeller: (log.args?.buyer as string) ?? null });
+  }
+  for (const log of sellOutcome.data as any[]) {
+    const tokensIn = log.args?.tokensIn as bigint | undefined;
+    const quoteOut = log.args?.quoteOut as bigint | undefined;
+    if (tokensIn === undefined || quoteOut === undefined || tokensIn <= 0n) continue;
+    trades.push({ blockNumber: Number(log.blockNumber), transactionHash: log.transactionHash, side: "SELL", quoteAmountRaw: quoteOut, tokenAmountRaw: tokensIn, buyerOrSeller: (log.args?.seller as string) ?? null });
+  }
+  trades.sort((a, b) => a.blockNumber - b.blockNumber);
+  return { trades, notes, completeness: "AVAILABLE_FULL", providerRole };
 }
 
 function tradePriceInQuote(trade: PonsCurveTrade, tokenDecimals: number, quoteDecimals: number): number {
@@ -124,16 +132,20 @@ function tradePriceInQuote(trade: PonsCurveTrade, tokenDecimals: number, quoteDe
 
 export class PonsCurveMarketReader {
   #chainClient: RobinhoodChainClient;
+  #logChainClient: RobinhoodChainClient;
+  #primaryCapabilities: RpcProviderCapabilities;
   #blockTimestampResolver: BlockTimestampResolver;
 
   constructor(options: PonsCurveMarketReaderOptions) {
     this.#chainClient = options.chainClient;
+    this.#logChainClient = options.logChainClient ?? options.chainClient;
+    this.#primaryCapabilities = options.primaryCapabilities ?? loadPrimaryRpcCapabilities();
     this.#blockTimestampResolver = options.blockTimestampResolver;
   }
 
   /** Current price = the most recent trade's implied price within the bounded window. Never a guess when the window has no trades. */
   async getCurrentPrice(curveAddress: string, quoteTokenAddress: string, tokenDecimals: number, quoteDecimals: number, fromBlock: bigint, toBlock: bigint): Promise<PonsCurvePriceResult> {
-    const { trades, notes } = await fetchCurveTrades(this.#chainClient, curveAddress, fromBlock, toBlock);
+    const { trades, notes } = await fetchCurveTrades(this.#chainClient, this.#logChainClient, this.#primaryCapabilities, curveAddress, fromBlock, toBlock);
     if (trades.length === 0) {
       return { priceInQuote: null, priceUsd: null, quoteTokenAddress, observedAtBlock: null, dataQuality: "UNAVAILABLE", notes: [...notes, "no CurveBuy/CurveSell events found within the bounded window"] };
     }
@@ -179,9 +191,17 @@ export class PonsCurveMarketReader {
     toBlock: bigint,
     now: Date = new Date(),
   ): Promise<PonsCurveFlowResult> {
-    const { trades, notes } = await fetchCurveTrades(this.#chainClient, curveAddress, fromBlock, toBlock);
+    const { trades, notes, completeness, providerRole } = await fetchCurveTrades(this.#chainClient, this.#logChainClient, this.#primaryCapabilities, curveAddress, fromBlock, toBlock);
     if (trades.length === 0) {
-      return { marketFlow: null, swaps: [], priceObservations: [], dataQuality: "UNAVAILABLE", notes: [...notes, "no CurveBuy/CurveSell events found within the bounded window"] };
+      return {
+        marketFlow: null,
+        swaps: [],
+        priceObservations: [],
+        dataQuality: "UNAVAILABLE",
+        flowCompleteness: completeness === "AVAILABLE_FULL" ? "AVAILABLE_FULL" : completeness, // a genuinely-empty-but-successfully-fetched window is honestly FULL, not a failure
+        providerRole,
+        notes: [...notes, completeness === "AVAILABLE_FULL" ? "no CurveBuy/CurveSell events found within the bounded window" : "curve event fetch did not complete"],
+      };
     }
 
     const swaps: SwapRecord[] = [];
@@ -210,6 +230,6 @@ export class PonsCurveMarketReader {
 
     const analyzer = new MarketFlowAnalyzer();
     const marketFlow = analyzer.analyze(chainId, curveAddress, swaps, quoteDecimals, now);
-    return { marketFlow, swaps, priceObservations, dataQuality: "KNOWN", notes };
+    return { marketFlow, swaps, priceObservations, dataQuality: "KNOWN", flowCompleteness: "AVAILABLE_FULL", providerRole, notes };
   }
 }

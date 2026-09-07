@@ -151,5 +151,65 @@ test("getRecentFlow degrades gracefully (no crash) when the underlying event fet
   const reader = new PonsCurveMarketReader({ chainClient, blockTimestampResolver: fakeBlockTimestampResolver() });
   const result = await reader.getRecentFlow(CHAIN_ID, CURVE, NON_STABLE_QUOTE, 18, 18, 0n, 1000n);
   assert.equal(result.dataQuality, "UNAVAILABLE");
-  assert.ok(result.notes.some((n) => n.includes("failed")));
+  assert.equal(result.flowCompleteness, "FAILED");
+  assert.ok(result.notes.some((n) => n.includes("did not complete")));
+});
+
+// --- Phase 7.4 §10/§31: hybrid RPC routing for the curve event fetch ---
+
+const CAPPED_AT_10 = { maxGetLogsBlockRange: 10, supportsLargeGetLogs: false };
+
+test("getRecentFlow: a small range (within the primary's known cap) is served entirely by the primary client", async () => {
+  let logClientCalled = false;
+  const chainClient = fakeChainClient({
+    getLogs: async ({ event }: any) => (event.name === "CurveBuy" ? [buyLog({ blockNumber: 100n })] : [sellLog({ blockNumber: 101n })]),
+  });
+  const logChainClient = fakeChainClient({
+    getLogs: async () => {
+      logClientCalled = true;
+      throw new Error("log client should not have been used for a small range");
+    },
+  });
+  const reader = new PonsCurveMarketReader({ chainClient, logChainClient, primaryCapabilities: CAPPED_AT_10, blockTimestampResolver: fakeBlockTimestampResolver() });
+  const result = await reader.getRecentFlow(CHAIN_ID, CURVE, NON_STABLE_QUOTE, 18, 18, 0n, 9n);
+  assert.equal(result.dataQuality, "KNOWN");
+  assert.equal(result.providerRole, "PRIMARY");
+  assert.equal(logClientCalled, false);
+});
+
+test("getRecentFlow: a large range (exceeding the primary's known cap) is routed to the log client — primary is never even attempted", async () => {
+  let primaryCalled = false;
+  const chainClient = fakeChainClient({
+    getLogs: async () => {
+      primaryCalled = true;
+      throw new Error("primary should not have been attempted for a range beyond its known cap");
+    },
+  });
+  const logChainClient = fakeChainClient({
+    getLogs: async ({ event }: any) => (event.name === "CurveBuy" ? [buyLog({ blockNumber: 54444500n })] : [sellLog({ blockNumber: 54444600n })]),
+  });
+  const reader = new PonsCurveMarketReader({ chainClient, logChainClient, primaryCapabilities: CAPPED_AT_10, blockTimestampResolver: fakeBlockTimestampResolver() });
+  const result = await reader.getRecentFlow(CHAIN_ID, CURVE, NON_STABLE_QUOTE, 18, 18, 54_444_453n, 54_551_522n); // the real Phase 7.3B corrected curve window
+  assert.equal(result.dataQuality, "KNOWN");
+  assert.equal(result.providerRole, "LOG");
+  assert.equal(primaryCalled, false);
+});
+
+test("getRecentFlow: produces the same semantic result whether served by the primary or the log client (transport-independent)", async () => {
+  const sameFetch = async ({ event }: any) => (event.name === "CurveBuy" ? [buyLog({ blockNumber: 100n })] : [sellLog({ blockNumber: 101n })]);
+  const viaPrimary = new PonsCurveMarketReader({ chainClient: fakeChainClient({ getLogs: sameFetch }), primaryCapabilities: CAPPED_AT_10, blockTimestampResolver: fakeBlockTimestampResolver() });
+  const viaLog = new PonsCurveMarketReader({
+    chainClient: fakeChainClient({ getLogs: async () => { throw new Error("must not be called"); } }),
+    logChainClient: fakeChainClient({ getLogs: sameFetch }),
+    primaryCapabilities: CAPPED_AT_10,
+    blockTimestampResolver: fakeBlockTimestampResolver(),
+  });
+
+  const small = await viaPrimary.getRecentFlow(CHAIN_ID, CURVE, NON_STABLE_QUOTE, 18, 18, 0n, 9n, new Date("2026-09-06T12:00:00.000Z"));
+  const large = await viaLog.getRecentFlow(CHAIN_ID, CURVE, NON_STABLE_QUOTE, 18, 18, 0n, 1000n, new Date("2026-09-06T12:00:00.000Z"));
+
+  assert.equal(small.providerRole, "PRIMARY");
+  assert.equal(large.providerRole, "LOG");
+  assert.deepEqual(small.swaps, large.swaps);
+  assert.equal(small.marketFlow?.buyCount, large.marketFlow?.buyCount);
 });

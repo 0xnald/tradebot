@@ -7,8 +7,8 @@
 
 import { getAddress, isAddress, keccak256, encodeAbiParameters, parseAbiItem, type Address } from "viem";
 import type { RobinhoodChainClient } from "../blockchain/robinhoodChainClient.js";
-import { PONS_ADDRESSES } from "../blockchain/chainConfig.js";
-import { fetchLogsWithAdaptiveChunking } from "../blockchain/logRangeChunking.js";
+import { PONS_ADDRESSES, loadPrimaryRpcCapabilities, type RpcProviderCapabilities } from "../blockchain/chainConfig.js";
+import { fetchLogsHybrid } from "../blockchain/hybridLogFetcher.js";
 import { PONS_V2_FACTORY_ABI, PONS_V2_GRADUATION_PHASES } from "./ponsV2Abi.js";
 import type { ProviderResult } from "../types/domain.js";
 
@@ -65,6 +65,10 @@ export interface PonsV2ProviderOptions {
   memeHookAddress?: Address;
   /** How far back (in blocks) to search for a graduated launch's `CurveCompleted` event. See `DEFAULT_GRADUATION_SEARCH_LOOKBACK_BLOCKS`'s doc comment for why this is bounded rather than a full-history scan. */
   graduationSearchLookbackBlocks?: bigint;
+  /** Phase 7.4 §10 — a separate client used ONLY for the graduation-timestamp event search (a genuine wide-range, `DEFAULT_GRADUATION_SEARCH_LOOKBACK_BLOCKS`-sized event-history query) when it exceeds `primaryCapabilities`'s known cap. Defaults to `chainClient`. */
+  logChainClient?: RobinhoodChainClient;
+  /** Phase 7.4 §5 — `chainClient`'s known eth_getLogs range cap. Defaults to `loadPrimaryRpcCapabilities()`. */
+  primaryCapabilities?: RpcProviderCapabilities;
 }
 
 /** Structural interface so callers (and tests) can supply a fake without constructing a real `PonsV2Provider`. */
@@ -93,12 +97,16 @@ function computeV4PoolId(token: Address, pairToken: Address, poolFee: number, ti
 export class PonsV2Provider implements PonsV2LaunchDataProvider {
   readonly name = "pons-v2-onchain";
   #chainClient: RobinhoodChainClient;
+  #logChainClient: RobinhoodChainClient;
+  #primaryCapabilities: RpcProviderCapabilities;
   #factoryAddress: Address;
   #memeHookAddress: Address;
   #graduationSearchLookbackBlocks: bigint;
 
   constructor(options: PonsV2ProviderOptions) {
     this.#chainClient = options.chainClient;
+    this.#logChainClient = options.logChainClient ?? options.chainClient;
+    this.#primaryCapabilities = options.primaryCapabilities ?? loadPrimaryRpcCapabilities();
     this.#factoryAddress = options.factoryAddress ?? (PONS_ADDRESSES.v2Factory as Address);
     this.#memeHookAddress = options.memeHookAddress ?? (PONS_ADDRESSES.v2MemeHook as Address);
     this.#graduationSearchLookbackBlocks = options.graduationSearchLookbackBlocks ?? DEFAULT_GRADUATION_SEARCH_LOOKBACK_BLOCKS;
@@ -190,12 +198,13 @@ export class PonsV2Provider implements PonsV2LaunchDataProvider {
     try {
       const currentBlock = await this.#chainClient.getBlockNumber();
       const fromBlock = currentBlock > this.#graduationSearchLookbackBlocks ? currentBlock - this.#graduationSearchLookbackBlocks : 0n;
-      const logs = await fetchLogsWithAdaptiveChunking(
-        (from, to) => this.#chainClient.getLogs({ address: curveAddress, event: CURVE_COMPLETED_EVENT, fromBlock: from, toBlock: to }),
-        fromBlock,
-        currentBlock,
+      const outcome = await fetchLogsHybrid(
+        { primary: this.#chainClient, log: this.#logChainClient },
+        { address: curveAddress, event: CURVE_COMPLETED_EVENT, fromBlock, toBlock: currentBlock },
+        { purpose: "PONS_GRADUATION_SEARCH", primaryCapabilities: this.#primaryCapabilities },
       );
-      const blockNumber = logs[0]?.blockNumber;
+      if (outcome.status !== "OK") return null;
+      const blockNumber = outcome.data[0]?.blockNumber;
       if (!blockNumber) return null;
       return await this.#chainClient.getBlockTimestamp(blockNumber);
     } catch {

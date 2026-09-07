@@ -23,20 +23,26 @@
 // §12 — the caller supplies fromBlock/toBlock (a bounded, ideally
 // launch/graduation-anchored window); this module does not choose it.
 
-import { fetchLogsWithAdaptiveChunking } from "../blockchain/logRangeChunking.js";
+import { fetchLogsHybrid } from "../blockchain/hybridLogFetcher.js";
 import { convertToUsd } from "../backtesting/quoteAssetUsdPricing.js";
 import { priceOfTokenInQuote } from "../backtesting/sqrtPriceX96.js";
 import { UNISWAP_V4_SWAP_EVENT } from "./uniswapV4Abi.js";
 import { MarketFlowAnalyzer } from "./marketFlowAnalyzer.js";
 import type { RobinhoodChainClient } from "../blockchain/robinhoodChainClient.js";
 import type { BlockTimestampResolver } from "../blockchain/blockTimestampResolver.js";
-import type { DataQualityState, MarketFlowAnalysis, SwapRecord, SwapSide } from "../types/domain.js";
+import { loadPrimaryRpcCapabilities, type RpcProviderCapabilities } from "../blockchain/chainConfig.js";
+import type { RpcProviderRole } from "../blockchain/rpcRouting.js";
+import type { DataQualityState, FlowCompleteness, MarketFlowAnalysis, SwapRecord, SwapSide } from "../types/domain.js";
 
 const MAX_SPLIT_DEPTH = 3;
 
 export interface UniswapV4FlowReaderOptions {
   chainClient: RobinhoodChainClient;
   blockTimestampResolver: BlockTimestampResolver;
+  /** Phase 7.4 §11 — a separate client used ONLY for the V4 Swap event fetch when the requested range exceeds `primaryCapabilities`'s known cap. Defaults to `chainClient`. */
+  logChainClient?: RobinhoodChainClient;
+  /** Phase 7.4 §5 — `chainClient`'s known eth_getLogs range cap. Defaults to `loadPrimaryRpcCapabilities()`. */
+  primaryCapabilities?: RpcProviderCapabilities;
 }
 
 export interface V4FlowContext {
@@ -56,6 +62,10 @@ export interface V4FlowResult {
   latestPriceUsd: number | null;
   unknownDirectionCount: number;
   dataQuality: DataQualityState;
+  /** Phase 7.4 §14 — honest completeness of the underlying Swap-event fetch. */
+  flowCompleteness: FlowCompleteness;
+  /** Phase 7.4 §9/§11 — which provider role actually served the Swap-event fetch. */
+  providerRole: RpcProviderRole;
   notes: string[];
 }
 
@@ -68,31 +78,29 @@ function classifyDirection(amount0: bigint, amount1: bigint, tokenIsCurrency0: b
 
 export class UniswapV4FlowReader {
   #chainClient: RobinhoodChainClient;
+  #logChainClient: RobinhoodChainClient;
+  #primaryCapabilities: RpcProviderCapabilities;
   #blockTimestampResolver: BlockTimestampResolver;
 
   constructor(options: UniswapV4FlowReaderOptions) {
     this.#chainClient = options.chainClient;
+    this.#logChainClient = options.logChainClient ?? options.chainClient;
+    this.#primaryCapabilities = options.primaryCapabilities ?? loadPrimaryRpcCapabilities();
     this.#blockTimestampResolver = options.blockTimestampResolver;
   }
 
   async getRecentFlow(chainId: number, context: V4FlowContext, fromBlock: bigint, toBlock: bigint, now: Date = new Date()): Promise<V4FlowResult> {
     const notes: string[] = [];
-    let logs: any[];
-    try {
-      logs = await fetchLogsWithAdaptiveChunking(
-        (from, to) =>
-          this.#chainClient.getLogs({
-            address: context.poolManagerAddress as `0x${string}`,
-            event: UNISWAP_V4_SWAP_EVENT,
-            args: { id: context.poolId as `0x${string}` },
-            fromBlock: from,
-            toBlock: to,
-          }),
-        fromBlock,
-        toBlock,
-        MAX_SPLIT_DEPTH,
-      );
-    } catch (error) {
+    const outcome = await fetchLogsHybrid(
+      { primary: this.#chainClient, log: this.#logChainClient },
+      { address: context.poolManagerAddress as `0x${string}`, event: UNISWAP_V4_SWAP_EVENT, args: { id: context.poolId as `0x${string}` }, fromBlock, toBlock },
+      { purpose: "UNISWAP_V4_FLOW", primaryCapabilities: this.#primaryCapabilities },
+      MAX_SPLIT_DEPTH,
+    );
+    const providerRole = outcome.providerRole;
+
+    if (outcome.status !== "OK") {
+      const flowCompleteness: FlowCompleteness = outcome.status === "TIMED_OUT" ? "TIMED_OUT" : outcome.status === "UNAVAILABLE" ? "UNAVAILABLE" : "FAILED";
       return {
         marketFlow: null,
         swaps: [],
@@ -101,12 +109,26 @@ export class UniswapV4FlowReader {
         latestPriceUsd: null,
         unknownDirectionCount: 0,
         dataQuality: "UNAVAILABLE",
-        notes: [`V4 Swap event fetch failed within the requested bounded window: ${error instanceof Error ? error.message : String(error)}`],
+        flowCompleteness,
+        providerRole,
+        notes: [`V4 Swap event fetch (${providerRole}) did not complete within the requested bounded window: ${outcome.reason ?? outcome.status}`],
       };
     }
 
+    const logs: any[] = outcome.data;
     if (logs.length === 0) {
-      return { marketFlow: null, swaps: [], priceObservations: [], latestPriceInQuote: null, latestPriceUsd: null, unknownDirectionCount: 0, dataQuality: "UNAVAILABLE", notes: ["no Swap events found for this PoolId within the bounded window"] };
+      return {
+        marketFlow: null,
+        swaps: [],
+        priceObservations: [],
+        latestPriceInQuote: null,
+        latestPriceUsd: null,
+        unknownDirectionCount: 0,
+        dataQuality: "UNAVAILABLE",
+        flowCompleteness: "AVAILABLE_FULL",
+        providerRole,
+        notes: ["no Swap events found for this PoolId within the bounded window"],
+      };
     }
 
     logs.sort((a, b) => Number(a.blockNumber) - Number(b.blockNumber));
@@ -172,6 +194,8 @@ export class UniswapV4FlowReader {
       latestPriceUsd: convertToUsd(latestPriceInQuote, context.quoteTokenAddress),
       unknownDirectionCount,
       dataQuality: marketFlow ? "KNOWN" : "UNAVAILABLE",
+      flowCompleteness: "AVAILABLE_FULL",
+      providerRole,
       notes,
     };
   }

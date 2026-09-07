@@ -88,6 +88,7 @@ import { buildDataQualitySummary } from "../shared/dataQuality.js";
 import { buildScoutWalletAssociations } from "../wallet-intelligence/scoutWalletAssociationBuilder.js";
 import type { CurrentPriceResolverDeps, CurrentPriceResult } from "./currentPriceResolver.js";
 import type { RobinhoodChainClient } from "../blockchain/robinhoodChainClient.js";
+import { loadPrimaryRpcCapabilities, type RpcProviderCapabilities } from "../blockchain/chainConfig.js";
 import { resolveMarketContextOnce, estimateRecentBlockWindow, CURVE_LOOKBACK_MINUTES, GRADUATION_MARGIN_MINUTES, type ResolvedMarketContext } from "./resolvedMarketContext.js";
 import { PonsCurveMarketReader } from "../market-data/ponsCurveMarketReader.js";
 import { UniswapV4FlowReader } from "../market-data/uniswapV4FlowReader.js";
@@ -171,6 +172,18 @@ export interface LiveIntelligenceDeps extends CurrentPriceResolverDeps {
   mediumPriorityChainClient?: RobinhoodChainClient;
   /** Phase 7.3 §4 — same idea, LOW priority, for deployer enrichment (the least time-critical live RPC work — §4's explicit example). Falls back to `onChain.chainClient` when not supplied. */
   lowPriorityChainClient?: RobinhoodChainClient;
+  /**
+   * Phase 7.4 §2/§10/§11 — a client pointed at the PUBLIC LOG RPC role,
+   * used ONLY for the Pons curve/V4 bounded event-history (`eth_getLogs`)
+   * fetches when their range exceeds the PRIMARY provider's known cap (see
+   * `chooseRpcForLogQuery`). Falls back to `onChain.chainClient` when not
+   * supplied, so every existing test/caller that doesn't set up hybrid
+   * routing is unaffected (single-provider behavior, exactly as before
+   * Phase 7.4).
+   */
+  logChainClient?: RobinhoodChainClient;
+  /** Phase 7.4 §5 — the PRIMARY provider's known eth_getLogs range cap, used by the hybrid routing decision. Defaults to `loadPrimaryRpcCapabilities()` (reads `ROBINHOOD_PRIMARY_MAX_GETLOGS_RANGE`) when not supplied. */
+  primaryRpcCapabilities?: RpcProviderCapabilities;
   /** Injectable clock — defaults to the real current time. Threading this through (rather than calling `new Date()` internally) keeps this module deterministically testable and keeps every timestamp aligned with the caller's own clock (e.g. the decision timestamp Smart Selection is evaluated against). */
   now?: () => Date;
 }
@@ -348,7 +361,12 @@ async function resolvePonsAwareMarketData(scoutSignal: ScoutSignal, contractAddr
         const calls: LiveProviderCallSummary[] = [];
 
         if (context.venueType === "PONS_V2_CURVE" && context.identifier && context.quoteTokenAddress && context.tokenDecimals != null && context.quoteTokenDecimals != null) {
-          const reader = new PonsCurveMarketReader({ chainClient: onChain.chainClient, blockTimestampResolver: onChain.blockTimestampResolver });
+          const reader = new PonsCurveMarketReader({
+            chainClient: onChain.chainClient,
+            logChainClient: deps.logChainClient ?? onChain.chainClient,
+            primaryCapabilities: deps.primaryRpcCapabilities ?? loadPrimaryRpcCapabilities(),
+            blockTimestampResolver: onChain.blockTimestampResolver,
+          });
           const window = await estimateRecentBlockWindow(onChain.blockTimeEstimator, onChain.chainClient, scoutSignal.postedAt ?? scoutSignal.receivedAt, CURVE_LOOKBACK_MINUTES, now);
           const flowStart = Date.now();
           const [flowResult, liquidityResult] = await Promise.all([
@@ -382,7 +400,12 @@ async function resolvePonsAwareMarketData(scoutSignal: ScoutSignal, contractAddr
         }
 
         if (context.venueType === "PONS_V2_V4_POOL" && context.identifier && context.poolManagerAddress && context.quoteTokenAddress && context.tokenDecimals != null && context.quoteTokenDecimals != null && context.tokenIsCurrency0 !== null) {
-          const reader = new UniswapV4FlowReader({ chainClient: onChain.chainClient, blockTimestampResolver: onChain.blockTimestampResolver });
+          const reader = new UniswapV4FlowReader({
+            chainClient: onChain.chainClient,
+            logChainClient: deps.logChainClient ?? onChain.chainClient,
+            primaryCapabilities: deps.primaryRpcCapabilities ?? loadPrimaryRpcCapabilities(),
+            blockTimestampResolver: onChain.blockTimestampResolver,
+          });
           const anchor = context.graduationTimestamp ?? scoutSignal.postedAt ?? scoutSignal.receivedAt;
           const window = await estimateRecentBlockWindow(onChain.blockTimeEstimator, onChain.chainClient, anchor, GRADUATION_MARGIN_MINUTES, now);
           const flowStart = Date.now();

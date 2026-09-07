@@ -20,7 +20,7 @@ import { createLogger } from "../src/shared/logger.js";
 import { FixtureFileAdapter } from "../src/ingestion/fixtureFileAdapter.js";
 import { TelegramMtprotoAdapter } from "../src/ingestion/telegramMtprotoAdapter.js";
 import { RobinhoodChainClient } from "../src/blockchain/robinhoodChainClient.js";
-import { loadChainConfigFromEnv, describeRpcEndpointSafely } from "../src/blockchain/chainConfig.js";
+import { loadChainConfigFromEnv, loadLogChainConfigFromEnv, loadPrimaryRpcCapabilities, describeRpcEndpointSafely } from "../src/blockchain/chainConfig.js";
 import { BlockTimestampResolver } from "../src/blockchain/blockTimestampResolver.js";
 import { BlockTimeEstimator } from "../src/blockchain/blockTimeEstimator.js";
 import { wrapChainClientWithRpcControl } from "../src/blockchain/instrumentedChainClient.js";
@@ -103,7 +103,16 @@ async function main(): Promise<void> {
   const rpcConfig = loadChainConfigFromEnv();
   logger.info("RPC endpoint", { provider: describeRpcEndpointSafely(rpcConfig.rpcUrl) });
 
+  // Phase 7.4 §2 — the PUBLIC LOG RPC role, a second independently-configured endpoint used only for
+  // bounded eth_getLogs event-history queries whose range exceeds the PRIMARY provider's known cap
+  // (see chainConfig.ts's `loadLogChainConfigFromEnv`/`loadPrimaryRpcCapabilities` and
+  // docs/RPC_PERFORMANCE.md). Logged the same safe way — never the raw URL.
+  const logRpcConfig = loadLogChainConfigFromEnv();
+  const primaryCapabilities = loadPrimaryRpcCapabilities();
+  logger.info("log RPC endpoint", { provider: describeRpcEndpointSafely(logRpcConfig.rpcUrl), primaryMaxGetLogsRange: primaryCapabilities.maxGetLogsBlockRange ?? "unlimited" });
+
   const chainClient = new RobinhoodChainClient();
+  const logChainClientRaw = new RobinhoodChainClient({ config: logRpcConfig });
 
   // Phase 7.3 §3/§4/§17/§22 — every RPC call the live path makes routes through ONE shared global
   // concurrency limiter (rpcConcurrencyLimiter.ts's `getGlobalRpcLimiter()`), reached via one of these
@@ -116,16 +125,23 @@ async function main(): Promise<void> {
   // RobinhoodChainClient` is the same structural-typing workaround this codebase already uses for
   // `RobinhoodChainClient`'s private fields in tests (see tokenAnalysisService.test.ts) — the wrapper
   // only ever adds instrumentation/throttling around read-only calls.
-  const criticalChainClient = wrapChainClientWithRpcControl(chainClient, { caller: "fresh-signal:critical", priority: "CRITICAL" }) as unknown as RobinhoodChainClient;
-  const mediumChainClient = wrapChainClientWithRpcControl(chainClient, { caller: "fresh-signal:medium", priority: "MEDIUM" }) as unknown as RobinhoodChainClient;
-  const lowChainClient = wrapChainClientWithRpcControl(chainClient, { caller: "fresh-signal:low", priority: "LOW" }) as unknown as RobinhoodChainClient;
-  const backgroundChainClient = wrapChainClientWithRpcControl(chainClient, { caller: "background:position+watch", priority: "LOW" }) as unknown as RobinhoodChainClient;
+  const criticalChainClient = wrapChainClientWithRpcControl(chainClient, { caller: "fresh-signal:critical", priority: "CRITICAL", role: "PRIMARY" }) as unknown as RobinhoodChainClient;
+  const mediumChainClient = wrapChainClientWithRpcControl(chainClient, { caller: "fresh-signal:medium", priority: "MEDIUM", role: "PRIMARY" }) as unknown as RobinhoodChainClient;
+  const lowChainClient = wrapChainClientWithRpcControl(chainClient, { caller: "fresh-signal:low", priority: "LOW", role: "PRIMARY" }) as unknown as RobinhoodChainClient;
+  const backgroundChainClient = wrapChainClientWithRpcControl(chainClient, { caller: "background:position+watch", priority: "LOW", role: "PRIMARY" }) as unknown as RobinhoodChainClient;
+
+  // Phase 7.4 §7 — the LOG role gets its OWN wrapper instances (over the SEPARATE `logChainClientRaw`,
+  // pointed at the log RPC endpoint) and its own global concurrency limiter (`getGlobalRpcLimiter("LOG")`,
+  // reached automatically via `role: "LOG"` here) — never the PRIMARY limiter, so a large bounded flow
+  // scan can never starve fresh-signal PRIMARY reads of concurrency slots, and vice versa.
+  const logChainClient = wrapChainClientWithRpcControl(logChainClientRaw, { caller: "fresh-signal:log", priority: "CRITICAL", role: "LOG" }) as unknown as RobinhoodChainClient;
+  const backgroundLogChainClient = wrapChainClientWithRpcControl(logChainClientRaw, { caller: "background:log", priority: "LOW", role: "LOG" }) as unknown as RobinhoodChainClient;
 
   const poolDataProvider = new UniswapV3PoolProvider({ chainClient: criticalChainClient });
   // Phase 7.1 §24 — a short-TTL cache (60s), live-only: safe here because every call is implicitly
   // "as of right now" (see cachingPonsV2Provider.ts for why this is NOT applied to the shared
   // backtesting venue resolver, where it would risk historical correctness).
-  const ponsV2Provider = new CachingPonsV2Provider(new PonsV2Provider({ chainClient: criticalChainClient }));
+  const ponsV2Provider = new CachingPonsV2Provider(new PonsV2Provider({ chainClient: criticalChainClient, logChainClient, primaryCapabilities }));
   const geckoTerminalProvider = new GeckoTerminalHistoricalPriceProvider();
   const marketDataProvider = new DexScreenerMarketDataProvider();
   const tokenAnalysisService = new TokenAnalysisService({ chainClient: mediumChainClient, holderProvider: new BlockscoutHolderDataProvider() });
@@ -141,7 +157,7 @@ async function main(): Promise<void> {
   // higher-priority fresh call (a background poll that misses the cache just pays its own LOW-priority
   // cost, exactly as it should).
   const backgroundPoolDataProvider = new UniswapV3PoolProvider({ chainClient: backgroundChainClient });
-  const backgroundPonsV2Provider = new CachingPonsV2Provider(new PonsV2Provider({ chainClient: backgroundChainClient }));
+  const backgroundPonsV2Provider = new CachingPonsV2Provider(new PonsV2Provider({ chainClient: backgroundChainClient, logChainClient: backgroundLogChainClient, primaryCapabilities }));
   const backgroundOnChainReconstruction = {
     chainClient: backgroundChainClient,
     blockTimestampResolver: new BlockTimestampResolver(backgroundChainClient),
@@ -155,7 +171,12 @@ async function main(): Promise<void> {
   const paperPositionRepository = createLivePaperPositionRepository();
   const watchObservationRepository = createWatchObservationRepository();
 
-  logger.info("RPC concurrency control", { maxConcurrency: getGlobalRpcLimiter().maxConcurrency, source: process.env.ROBINHOOD_RPC_MAX_CONCURRENCY ? "ROBINHOOD_RPC_MAX_CONCURRENCY" : "default (see docs/RPC_PERFORMANCE.md)" });
+  logger.info("RPC concurrency control", {
+    primaryMaxConcurrency: getGlobalRpcLimiter("PRIMARY").maxConcurrency,
+    primarySource: process.env.ROBINHOOD_RPC_MAX_CONCURRENCY ? "ROBINHOOD_RPC_MAX_CONCURRENCY" : "default (see docs/RPC_PERFORMANCE.md)",
+    logMaxConcurrency: getGlobalRpcLimiter("LOG").maxConcurrency,
+    logSource: process.env.ROBINHOOD_LOG_RPC_MAX_CONCURRENCY ? "ROBINHOOD_LOG_RPC_MAX_CONCURRENCY" : "default (see docs/RPC_PERFORMANCE.md)",
+  });
 
   const pipeline = new LivePipeline({
     adapter,
@@ -172,6 +193,8 @@ async function main(): Promise<void> {
         timeoutMs: PROVIDER_TIMEOUT_MS,
         mediumPriorityChainClient: mediumChainClient,
         lowPriorityChainClient: lowChainClient,
+        logChainClient,
+        primaryRpcCapabilities: primaryCapabilities,
       },
       smartSelectionEngine,
       portfolio,
