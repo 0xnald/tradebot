@@ -139,6 +139,31 @@ described in the phase brief were not exhaustively built, given the
 depth this investigation required to reach a confident, evidence-based
 root cause; reported honestly as bounded scope, not claimed as complete.
 
+Most recently, **Phase 7.3B — RPC range semantics & block-window
+calibration** traced Phase 7.3's "one slow call" to its actual root
+cause: the authenticated RPC provider configured for testing has a hard
+10-block `eth_getLogs` cap (a plan/account policy, confirmed by the
+provider's own error text), and a separate bug inflated the requested
+range to ~2.19 million blocks for a nominal 180-minute lookback (fixed —
+see `docs/RPC_PERFORMANCE.md`). **Phase 7.4 — hybrid RPC routing & live
+Scout observation** then split RPC traffic across two explicit provider
+roles (`src/blockchain/rpcRouting.ts`) so bounded flow queries route to
+whichever provider can actually serve their range, and added the
+continuous live-observation layer: REPLAY/LIVE separation on every
+persisted record, per-signal console status output, fixed-horizon
+post-decision observation tracking (+1m through +4h) for WATCH and
+TRADE_CANDIDATE decisions, and `npm run live:status`/`live:report`
+commands. Measured result: an isolated single-signal test went from 0/4
+to 4/4 known Pons tokens resolving venue, with `eth_getLogs` succeeding
+cleanly for the first time. Under real multi-signal concurrent load,
+venue resolution remains inconsistent — a different, further bottleneck
+(RPC concurrency contention on the classification call itself) not
+addressed in this phase, reported honestly rather than papered over.
+Smart Selection and the confidence threshold were not touched. No
+Telegram credentials were configured in this environment, so the real
+live-connection path was exercised only via REPLAY and unit tests, not
+live network traffic.
+
 ## Phases
 
 Each phase should be reviewed and explicitly approved before moving to the

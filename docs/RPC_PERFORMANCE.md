@@ -297,3 +297,77 @@ signal — a genuinely slow, necessary `eth_getLogs` call against the
 public RPC is. That is a different, narrower, and more actionable problem
 than "contention," and the evidence for it is reproducible via
 `scripts/singleSignalControl.ts`.
+
+## Phase 7.3B — the authenticated endpoint's real limit, and the actual root cause
+
+An authenticated Alchemy endpoint was configured (`ROBINHOOD_RPC_HTTP`/
+`ROBINHOOD_CHAIN_RPC_URL`) to test whether a paid provider would remove
+the bottleneck above. It did not, but it revealed exactly why:
+
+- **Direct probing** (`scripts/phase73bProbe.ts`) found a hard 10-block
+  cap on this account's `eth_getLogs`: a 10-block range succeeds, an
+  11-block range fails outright, every time.
+- **The provider's own error text confirms this is a plan/account
+  policy, not a performance limit**: *"Under the Free tier plan, you can
+  make eth_getLogs requests with up to a 10 block range... Upgrade to
+  PAYG for expanded block range."*
+- Measured Robinhood Chain block production is a steady **~9.91 blocks/
+  sec** — not the ~200 blocks/sec earlier assumed.
+- A separate, independent bug was found and fixed in
+  `estimateRecentBlockWindow` (`src/live/resolvedMarketContext.ts`):
+  `toBlock` was unconditionally the LIVE chain tip, while `fromBlock` was
+  anchored to the Scout signal's own timestamp. Every test/replay run
+  processes a real signal from days in the past while `toBlock` reflected
+  today's tip — producing the ~2.19-million-block ranges originally
+  observed for a nominal 180-minute lookback. Fixed by bounding `toBlock`
+  to `min(liveTip, estimateBlockAt(anchor))`; the corrected windows are
+  ~107,000 blocks (180 min curve lookback) and ~2,974 blocks (5 min V4
+  margin) — matching the measured chain rate exactly.
+- The retry logic (`fetchLogsWithAdaptiveChunking`) was also fixed: it
+  used to bisect on ANY thrown error, including the flat 10-block-cap
+  rejection above (whose own error text happens to contain the phrase
+  "block range", classifying it as `RANGE_LIMIT`) — bisecting a
+  multi-hundred-thousand-block range toward a 10-block floor needs 15+
+  splits, far past any sane depth, and was multiplying RPC calls (12–55
+  per signal) without ever succeeding. See `src/blockchain/
+  rpcErrorClassification.ts`: only `TOO_MANY_RESULTS` (Phase 6.6's
+  original, validated public-RPC case) is bisectable now.
+
+## Phase 7.4 — hybrid routing: use the right provider for the right job
+
+Given the above, no single provider is right for everything: the
+authenticated endpoint is faster for ordinary reads (`eth_call`,
+`getBlockNumber`, metadata, Pons lifecycle) but cannot serve this
+project's real `eth_getLogs` windows at all; the public RPC has no known
+range cap and was measured (Phase 7.3A/B) serving the corrected windows
+in a few hundred milliseconds.
+
+`src/blockchain/rpcRouting.ts`'s `chooseRpcForLogQuery` decides PRIMARY
+vs. LOG **before** any request is made — purely from the requested range
+vs. `RpcProviderCapabilities` (`src/blockchain/chainConfig.ts`,
+`ROBINHOOD_PRIMARY_MAX_GETLOGS_RANGE`, default 10) — never "try the
+authenticated endpoint first, wait for the predictable rejection, then
+fall back." `src/blockchain/hybridLogFetcher.ts` executes that decision
+and reports a structured `OK | FAILED | TIMED_OUT | RATE_LIMITED |
+UNAVAILABLE` outcome; a LOG-provider failure never falls back to PRIMARY,
+since routing already established PRIMARY can't serve that range.
+
+Both `PonsCurveMarketReader` and `UniswapV4FlowReader` (and `PonsV2Provider`'s
+graduation search) now route through this — confirmed empirically: an
+isolated single-signal run went from 0/4 known Pons tokens resolving
+venue to **4/4**, with `eth_getLogs` succeeding cleanly (0 errors) instead
+of failing 100% of the time. A second, previously-hidden bottleneck
+surfaced once the log fetch itself started succeeding: resolving each
+trade's block timestamp one at a time in a sequential loop — fixed by
+resolving them concurrently via `Promise.all` (`BlockTimestampResolver`
+already de-duplicates concurrent requests for the same block).
+
+**Remaining, honestly reported**: under REAL multi-signal concurrent
+load (the full 7-signal replay, not the isolated single-signal control),
+venue resolution is still inconsistent — Pons classification's own
+`readContract` call can queue behind other RPC work sharing the same
+PRIMARY concurrency slots long enough to miss the shared decision
+deadline. This is a distinct, further bottleneck from the one this phase
+targeted (transport/routing) and was not addressed here, per the
+explicit instruction not to change timeouts or thresholds reactively —
+see the Phase 7.4 final report for the measured before/after numbers.

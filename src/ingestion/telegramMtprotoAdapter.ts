@@ -44,6 +44,10 @@ export class TelegramMtprotoAdapter implements ScoutIngestionAdapter {
   }
 
   async start(onMessage: (message: RawScoutMessage) => void | Promise<void>): Promise<void> {
+    // Phase 7.4 §26 — `connectionRetries` is GramJS's own built-in reconnect-with-backoff for
+    // transient MTProto connection drops (never a custom busy-loop on our side). Restart-level
+    // duplicate protection is separate and already handled by LivePipeline.recoverFromDisk's
+    // persisted dedup state, checked via `isDuplicate` before any message is processed.
     const session = new StringSession(this.#options.sessionString);
     const client = new TelegramClient(session, this.#options.apiId, this.#options.apiHash, {
       connectionRetries: 5,

@@ -432,6 +432,59 @@ Full detail: `docs/RPC_PERFORMANCE.md`. Summary:
   cause. What was measured is reported in full in
   `docs/RPC_PERFORMANCE.md`.
 
+## Phase 7.4 — continuous live observation
+
+`npm run live` was already capable of running indefinitely for a genuine
+Telegram connection (only REPLAY mode has a natural end — the fixture is
+finite); Phase 7.4 added the accounting and reporting layer around it:
+
+- **REPLAY vs. LIVE separation** (`LiveSignalRecord.mode`): every record
+  is tagged explicitly, set from `isReplay` in `scripts/liveScout.ts` and
+  threaded through every return path in `signalProcessor.ts` — including
+  the early-rejection path (PERFORMANCE_UPDATE, missing contract address,
+  etc.), which a first implementation missed, silently mis-tagging every
+  rejected message as LIVE regardless of the real run mode (caught by a
+  regression test before it could corrupt a report). `npm run live:status`
+  and `npm run live:report` both read this field and never combine the
+  two.
+- **Per-signal console output**: `[SCOUT] token: ... venue: ... price:
+  ... flow: ... confidence: ... score: ... decision: ... latency: ...
+  paper_position: ...` for every eligible call, via an `onRecordProcessed`
+  hook on `LivePipeline` — a `PERFORMANCE_UPDATE` gets one line noting
+  it's not a new opportunity, never a full decision line.
+- **Post-decision observation at fixed horizons** (`+1m/+5m/+15m/+30m/
+  +1h/+4h`, `src/live/livePipeline.ts`'s `POST_DECISION_HORIZONS`):
+  extends the existing Phase 7.2 WATCH-observation mechanism (same
+  poll cycle, same repository) to also track legitimate `TRADE_CANDIDATE`
+  decisions, and to fire each horizon exactly once (rather than
+  continuously re-polling) — never holding the live decision open waiting
+  for it. Each `WatchObservation` now carries `horizonLabel` and
+  `returnFromDecisionPct` (computed from `LiveSignalRecord.decisionPriceUsd`,
+  the price actually decided against — never re-derived from a later
+  observation). On restart, horizons already elapsed before the crash are
+  treated as handled rather than re-fired (§25 "where practical" — avoids
+  duplicate observations at the cost of not guaranteeing zero gaps for a
+  horizon that fell exactly during downtime).
+- **`npm run live:status`** — a point-in-time snapshot from the persisted
+  NDJSON files (signal counts, decision distribution, latency, provider
+  failures, open/closed paper positions), safe to run alongside a live
+  process.
+- **`npm run live:report`** — accumulated LIVE-only statistics: decision
+  distribution, average confidence, market-flow availability, venue
+  distribution, paper entries, and post-decision observation returns
+  bucketed by horizon and by WATCH vs. TRADE_CANDIDATE — the evidence base
+  a future strategy change should be based on.
+- **Reconnect**: `TelegramMtprotoAdapter` relies on GramJS's own
+  `connectionRetries` for transient MTProto disconnects (never a custom
+  busy-loop); restart-level duplicate protection is the existing
+  `recoverFromDisk`/`isDuplicate` dedup state, unchanged.
+
+**Not exercised live in this phase**: no Telegram credentials
+(`TELEGRAM_API_ID`/`API_HASH`/`SESSION_STRING`) were configured in this
+environment, so the real Telegram connection path was not verified
+against live network traffic — only via REPLAY and unit tests. This is
+disclosed, not assumed working.
+
 ## Explicitly not built (per the stop condition)
 
 No live execution, no wallet signing, no private keys, no transaction

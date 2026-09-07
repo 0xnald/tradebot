@@ -377,6 +377,40 @@ RPC request count per signal from up to 19 to a consistent 4 — but this
 did not change the outcome, confirming it was a secondary cost, not the
 critical-path one.
 
+## Phase 7.4 update — flow retrieval actually works now
+
+The finding above (a slow/failing `eth_getLogs` call as the critical-path
+bottleneck) was Phase 7.2/7.3's honest conclusion. Phase 7.3B/7.4 traced
+that specific call all the way down: the authenticated RPC provider
+configured for this project has a hard 10-block `eth_getLogs` cap (an
+account/plan policy, confirmed by the provider's own error text — see
+`docs/RPC_PERFORMANCE.md`), and a separate bug inflated the requested
+range to ~2.19 million blocks for a nominal 180-minute lookback. Both are
+now fixed: `resolveMarketContextOnce`'s block-window calculation is
+corrected (~107,000 blocks for the real 180-minute curve lookback), and
+`PonsCurveMarketReader`/`UniswapV4FlowReader` route their bounded
+event-history fetch to whichever RPC provider role can actually serve
+that range (`src/blockchain/rpcRouting.ts`) — never assuming the
+authenticated endpoint can, never trying it first and falling back after
+a predictable rejection.
+
+Result, measured via `scripts/singleSignalControl.ts` (isolated, no
+concurrency contention): Pons venue resolution went from 0/4 to **4/4**
+known tokens, with the underlying `eth_getLogs` call succeeding cleanly.
+A second, previously-invisible bottleneck was found once real trade data
+started flowing through: resolving each trade's block timestamp
+sequentially (`for...await`) rather than concurrently — fixed via
+`Promise.all` (identical values, computed faster).
+
+**Still open, honestly**: under the full 7-signal REPLAY (real concurrent
+load, not the isolated single-signal case), venue resolution remains
+inconsistent — the classification `readContract` call can queue behind
+other concurrent RPC work long enough to miss the shared ~4-second
+decision deadline. This is a distinct constraint from the transport
+problem this phase fixed, and was not addressed here (see
+`docs/RPC_PERFORMANCE.md` and the Phase 7.4 final report for the measured
+numbers).
+
 ## Reference: existing types touched
 
 `SmartSelectionInputs` (`src/scoring/smartSelectionEngine.ts`),

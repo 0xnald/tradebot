@@ -465,6 +465,29 @@ that concurrency was the wrong lever, redirecting the actual fix toward
 the specific slow call instead of a general "add more capacity" approach
 that would not have helped.
 
+## Phase 7.4 finding: the "one slow call" was a provider policy limit, and fixing transport surfaced a second, different bottleneck
+
+Phase 7.3's "one slow call" turned out (Phase 7.3B) to be a flat 10-block
+`eth_getLogs` cap on the authenticated provider's plan — a policy limit,
+not something any amount of retrying or timeout-raising could fix.
+`src/blockchain/rpcRouting.ts` routes each bounded log query to whichever
+of two configured RPC provider roles (PRIMARY/authenticated, LOG/public)
+can actually serve its range, decided from `RpcProviderCapabilities`
+before any request is made. Fixing transport didn't finish the job by
+itself: once the log fetch started succeeding, resolving each returned
+trade's block timestamp turned out to be happening sequentially rather
+than concurrently, which alone could exceed the whole decision budget for
+a busy pool — a second, previously-invisible bottleneck only visible once
+the first one was actually removed. And under real multi-signal
+concurrent load (vs. an isolated single-signal test), Pons classification
+itself can still occasionally miss the shared decision deadline by
+queueing behind other RPC work — a third, distinct, not-yet-addressed
+constraint. Three different bottlenecks, three different classes of fix
+(provider policy → routing, sequential I/O → concurrency, contention →
+still open) — none of which resembled the others going in, which is why
+this project keeps measuring rather than assuming the next fix is the
+last one.
+
 ## Data contracts
 
 Canonical shapes live in `src/types/domain.ts`: `ScoutSignal`,

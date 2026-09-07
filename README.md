@@ -188,6 +188,33 @@ concentrated holders scores 42.8 → `IGNORE`, entirely reproducibly.
 npm test   # includes ~100 new Phase 5 unit tests plus 26 end-to-end scenario tests, fully deterministic
 ```
 
+## Live Scout pipeline (Phase 7 / 7.4)
+
+```bash
+npm run live          # connects to the real Scout Telegram channel if
+                       # TELEGRAM_API_ID/API_HASH/SESSION_STRING are set,
+                       # otherwise replays the captured fixture — runs
+                       # until Ctrl+C, paper trading only
+npm run live:status   # point-in-time snapshot from the persisted NDJSON
+                       # files — signal counts, decisions, latency, provider
+                       # failures, open/closed paper positions
+npm run live:report   # accumulated LIVE-only statistics (decision
+                       # distribution, confidence, market-flow coverage,
+                       # venue distribution, post-decision observation
+                       # returns by horizon) — the evidence base for any
+                       # future strategy change; never mixes REPLAY runs in
+```
+
+Robinhood Chain RPC is split into two explicit roles (`src/blockchain/
+rpcRouting.ts`): a PRIMARY/authenticated provider for ordinary reads, and
+a PUBLIC LOG provider for bounded `eth_getLogs` event-history queries
+whose range exceeds the primary provider's known capability — decided
+deterministically before either request is made, never by trying one and
+falling back after a predictable rejection. See `docs/RPC_PERFORMANCE.md`
+for the full investigation and `docs/LIVE_PIPELINE.md` for the live
+observation architecture (post-decision horizons, REPLAY/LIVE separation,
+restart safety).
+
 ## Project structure
 
 See `ARCHITECTURE.md` for the module map, or run:

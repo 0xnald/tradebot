@@ -368,6 +368,33 @@ supported, §1) are the intended path to a higher-throughput authenticated
 endpoint if one becomes available; no such endpoint was available to test
 against in this phase.
 
+## 7b. Two RPC provider roles (Phase 7.4 — see docs/RPC_PERFORMANCE.md)
+
+An authenticated endpoint WAS configured and tested in Phase 7.3B/7.4. It
+is faster for ordinary reads but has a hard, plan-level 10-block cap on
+`eth_getLogs` (confirmed by direct probing and by the provider's own
+error text) — incompatible with this project's real flow-query windows
+(~107,000 / ~2,974 blocks). The public RPC has no known range cap and was
+measured serving those same corrected windows in a few hundred
+milliseconds. Both are now configured simultaneously and used for
+different roles:
+
+- **PRIMARY** (`ROBINHOOD_RPC_HTTP`/`ROBINHOOD_CHAIN_RPC_URL`, or the
+  public default if unset): `eth_call`, `getBlockNumber`, `getBlock`,
+  contract/token metadata, Pons factory/lifecycle lookup, bytecode,
+  `totalSupply`, and any `eth_getLogs` call within its known range cap.
+- **LOG** (`ROBINHOOD_CHAIN_LOG_RPC_URL`, defaulting to the same public
+  endpoint): bounded `eth_getLogs` calls whose range exceeds PRIMARY's
+  known cap — Pons `CurveBuy`/`CurveSell`, Uniswap V4 `Swap`, and the
+  Pons graduation-event search.
+
+The routing decision (`src/blockchain/rpcRouting.ts`) is made from the
+requested range vs. `RpcProviderCapabilities`
+(`ROBINHOOD_PRIMARY_MAX_GETLOGS_RANGE`, default 10) — never by trying
+PRIMARY first and falling back after a predictable rejection. Raising
+that env var (e.g. after a plan upgrade) changes routing behavior with no
+code change.
+
 ## 8. Explicitly rejected / not used
 
 - `teleproto` (see Phase 1 notes) — unrelated to this phase, still not used.
