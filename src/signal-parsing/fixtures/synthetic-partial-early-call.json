@@ -1,0 +1,14 @@
+{
+  "_provenance": "SYNTHETIC — hand-constructed by removing the Age and 24h-volume lines from the real EARLY_CALL template (see real-early-call.json), to exercise partial-message parsing. Not a real Scout post.",
+  "message": {
+    "id": "9001",
+    "channel": "scoutrobinhood",
+    "postedAt": "2026-09-04T21:00:00+00:00",
+    "text": "🚨 EARLY CALL — $TESTCOIN · robinhood\n💰 called at $40k\n\n📊 Pool Info\n🏛 DEX: Pons V2\n📈 Mcap: $42k\n💧 Liq: $10k | 25.0%\n🧾 Tax: B 0% | S 0%\n\n🪙 Token Info\n👥 Holders: 55\n\n🔎 Proof: 1 elite + 1 good holding — validated on-chain\n\n⚠️ dyor, nfa",
+    "messageUrl": "https://t.me/scoutrobinhood/9001",
+    "buttons": [
+      { "text": "⚡ BasedBot", "url": "https://t.me/based_eth_bot?start=r_scout_b_0x1111111111111111111111111111111111111111" },
+      { "text": "📈 GMGN", "url": "https://gmgn.ai/robinhood/token/scout_0x1111111111111111111111111111111111111111" }
+    ]
+  }
+}

@@ -1,0 +1,45 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+
+# Coverage
+coverage/
+
+# Telegram/session credentials (defense-in-depth — this project only ever
+# stores the session as TELEGRAM_SESSION_STRING inside .env, never a file on
+# disk, but ignore the conventional session-file patterns too in case that
+# ever changes).
+*.session
+*.session.json
+
+# Runtime data (paper trading records, signal logs, local DB files)
+/data/*
+!/data/README.md
+
+# Temporary/diagnostic output
+*.tmp
+.tmp/
+tmp/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+
+# Local tool/session runtime state (not project source)
+.claude/

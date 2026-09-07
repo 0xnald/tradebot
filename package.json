@@ -1,0 +1,31 @@
+{
+  "name": "scout-alpha",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Risk-gated trading agent that independently evaluates Scout Robinhood opportunity leads before trading on Robinhood Chain. Paper trading only at this stage.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/**/*.test.ts",
+    "test:integration": "tsx --test src/**/*.test.integration.ts",
+    "ingest:dev": "tsx src/ingestion/runDev.ts",
+    "telegram:login": "tsx scripts/telegram-login.ts",
+    "backtest": "tsx --env-file-if-exists=.env scripts/backtest.ts",
+    "backtest:report": "tsx scripts/backtestReport.ts",
+    "live": "tsx --env-file-if-exists=.env scripts/liveScout.ts",
+    "rpc:benchmark": "tsx --env-file-if-exists=.env scripts/rpcProviderBenchmark.ts"
+  },
+  "dependencies": {
+    "telegram": "^2.26.16",
+    "viem": "^2.56.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}

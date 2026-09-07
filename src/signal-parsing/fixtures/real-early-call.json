@@ -1,0 +1,17 @@
+{
+  "_provenance": "REAL — captured verbatim from https://t.me/s/scoutrobinhood on 2026-09-04 (message 5114). See src/ingestion/fixtures/README.md.",
+  "message": {
+    "id": "5114",
+    "channel": "scoutrobinhood",
+    "postedAt": "2026-09-04T19:54:09+00:00",
+    "text": "🚨 EARLY CALL — $THROBBIN · robinhood\n💰 called at $57k\n\n📊 Pool Info\n🏛 DEX: Pons V2\n📈 Mcap: $50k\n💧 Liq: $18k | 36.1%\n🧾 Tax: B 0% | S 0%\n\n🪙 Token Info\n⏱ Age: 2m · 🚀 pons_v2\n👥 Holders: 130\n📊 Vol 24h: $41k\n🔥 378 swaps (5m)\n\n🔎 Proof: 4 elite + 3 good holding — validated on-chain\n\n📹 Live buys (💎 elite · ✅ good)\n✅ $481 · 0x3430…c941\n✅ $361 · 0x2faa…c008\n✅ $241 · 0xc882…facc\n💎 $241 · 0x09dc…298f\n💎 $181 · 0x6d39…889d\n💎 $144 · 0xaea1…f9cd\n💎 $120 · 0x77c5…b2f4\n\n⚠️ dyor, nfa",
+    "messageUrl": "https://t.me/scoutrobinhood/5114",
+    "buttons": [
+      { "text": "⚡ BasedBot", "url": "https://t.me/based_eth_bot?start=r_scout_b_0xeb1898a0d496000506a2799e1b4077776497fd29" },
+      { "text": "📈 GMGN", "url": "https://gmgn.ai/robinhood/token/scout_0xeb1898a0d496000506a2799e1b4077776497fd29" },
+      { "text": "🔍 DexS", "url": "https://dexscreener.com/robinhood/0xeb1898a0d496000506a2799e1b4077776497fd29" },
+      { "text": "🦎 Gecko", "url": "https://www.geckoterminal.com/robinhood/tokens/0xeb1898a0d496000506a2799e1b4077776497fd29" },
+      { "text": "𝕏 Search", "url": "https://x.com/search?q=0xeb1898a0d496000506a2799e1b4077776497fd29" }
+    ]
+  }
+}

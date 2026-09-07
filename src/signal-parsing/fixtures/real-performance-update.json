@@ -1,0 +1,17 @@
+{
+  "_provenance": "REAL — captured verbatim from https://t.me/s/scoutrobinhood on 2026-09-04 (message 5112). See src/ingestion/fixtures/README.md.",
+  "message": {
+    "id": "5112",
+    "channel": "scoutrobinhood",
+    "postedAt": "2026-09-04T19:51:55+00:00",
+    "text": "🔥 $GOLDENCAT hit 5X\ncalled $28k → $139k\npeak since the call · dyor",
+    "messageUrl": "https://t.me/scoutrobinhood/5112",
+    "buttons": [
+      { "text": "⚡ BasedBot", "url": "https://t.me/based_eth_bot?start=r_scout_b_0x25caf5ea23ce1b6b913761129d93a873205d273a" },
+      { "text": "📈 GMGN", "url": "https://gmgn.ai/robinhood/token/scout_0x25caf5ea23ce1b6b913761129d93a873205d273a" },
+      { "text": "🔍 DexS", "url": "https://dexscreener.com/robinhood/0x25caf5ea23ce1b6b913761129d93a873205d273a" },
+      { "text": "🦎 Gecko", "url": "https://www.geckoterminal.com/robinhood/tokens/0x25caf5ea23ce1b6b913761129d93a873205d273a" },
+      { "text": "𝕏 Search", "url": "https://x.com/search?q=0x25caf5ea23ce1b6b913761129d93a873205d273a" }
+    ]
+  }
+}

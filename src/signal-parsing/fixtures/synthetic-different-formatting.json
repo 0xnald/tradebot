@@ -1,0 +1,14 @@
+{
+  "_provenance": "SYNTHETIC — hand-constructed variant of the real EARLY_CALL template exercising realistic formatting variance actually observed elsewhere in the captured sample: comma-grouped holder count (seen on e.g. message 5120's live-buy amounts), extra blank lines, and a decimal age value (seen on message 5115's '6.9h'). Not a real Scout post.",
+  "message": {
+    "id": "9004",
+    "channel": "scoutrobinhood",
+    "postedAt": "2026-09-04T21:15:00+00:00",
+    "text": "🚨 EARLY CALL — $SPACEY · robinhood\n💰 called at $200k\n\n\n📊 Pool Info\n🏛 DEX: Uniswap V3\n📈 Mcap: $210k\n💧 Liq: $60k | 28.6%\n🧾 Tax: B 0% | S 0%\n\n🪙 Token Info\n⏱ Age: 1.5h\n👥 Holders: 1,980\n📊 Vol 24h: $90k\n🔥 500 swaps (5m)\n\n🔎 Proof: 5 elite + 5 good holding — validated on-chain\n\n📹 Live buys (💎 elite · ✅ good)\n💎 $1,000 · 0xaaaa…bbbb\n\n⚠️ dyor, nfa",
+    "messageUrl": "https://t.me/scoutrobinhood/9004",
+    "buttons": [
+      { "text": "⚡ BasedBot", "url": "https://t.me/based_eth_bot?start=r_scout_b_0x3333333333333333333333333333333333333333" },
+      { "text": "📈 GMGN", "url": "https://gmgn.ai/robinhood/token/scout_0x3333333333333333333333333333333333333333" }
+    ]
+  }
+}
